@@ -1,0 +1,37 @@
+
+name: Build SCAudioExport
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "SCAudioExport/**"
+      - "src/**"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build SCAudioExport
+        run: >
+          msbuild SCAudioExport/SCAudioExport.csproj
+          /restore
+          /t:Build
+          /p:Configuration=Release
+          /p:Platform=AnyCPU
+
+      - name: Upload build output
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCAudioExport-Release
+          path: SCAudioExport/bin/Release/
+          if-no-files-found: error
