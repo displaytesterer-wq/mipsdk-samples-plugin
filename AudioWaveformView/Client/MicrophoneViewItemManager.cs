@@ -8,7 +8,7 @@ namespace AudioWaveformView.Client
     public class MicrophoneViewItemManager : ViewItemManager
     {
         private Item _microphone;
-        private readonly PreviewTimelineSource _timeline = new PreviewTimelineSource();
+        private readonly RecordingTimelineSource _timeline = new RecordingTimelineSource();
 
         public MicrophoneViewItemManager() : base("MicrophoneWaveformManager") { }
 
@@ -22,7 +22,7 @@ namespace AudioWaveformView.Client
                 _microphone = value;
                 SetProperty("MicrophoneFQID", value == null ? "" : value.FQID.ToXmlNode().OuterXml);
                 SaveProperties();
-                _timeline.Clear();
+                _timeline.SelectMicrophone(value);
             }
         }
 
@@ -36,9 +36,10 @@ namespace AudioWaveformView.Client
                 _microphone = item != null && item.FQID.Kind == Kind.Microphone ? item : null;
             }
             catch { _microphone = null; }
+            _timeline.SelectMicrophone(_microphone);
         }
 
-        public PreviewTimelineSource Timeline { get { return _timeline; } }
+        public RecordingTimelineSource Timeline { get { return _timeline; } }
 
         public override IEnumerable<TimelineSequenceSource> TimelineSequenceSources
         {
