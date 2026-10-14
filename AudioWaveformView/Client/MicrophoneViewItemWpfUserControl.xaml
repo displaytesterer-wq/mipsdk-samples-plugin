@@ -43,7 +43,7 @@
             </DockPanel>
             <Canvas x:Name="RecordingCanvas" Height="25" Background="#283845"
                     SizeChanged="RecordingCanvas_SizeChanged"/>
-            <TextBlock Text="Green means server-reported recorded data; dark means no indexed data or not queried."
+            <TextBlock Text="Green: confirmed server sequences or decoded PCM frames. Empty is not proof of no recording."
                        Foreground="#91a4b3" FontSize="10" TextWrapping="Wrap" Margin="0,2,0,0"/>
         </StackPanel>
         <Grid Grid.Row="3" Margin="12,0,12,6" Background="#0e1721">
