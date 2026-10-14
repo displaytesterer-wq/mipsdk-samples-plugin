@@ -35,7 +35,8 @@
     <Compile Include="AudioWaveformViewDefinition.cs"/>
     <Compile Include="Client\MicrophoneViewItemPlugin.cs"/>
     <Compile Include="Client\MicrophoneViewItemManager.cs"/>
-    <Compile Include="Client\PreviewTimelineSource.cs"/>
+    <Compile Include="Client\RecordingIntervalProvider.cs"/>
+    <Compile Include="Client\RecordingTimelineSource.cs"/>
     <Compile Include="Client\WavExportService.cs"/>
     <Compile Include="Client\WavPeakReader.cs"/>
     <Compile Include="Client\MicrophoneViewItemWpfUserControl.xaml.cs"><DependentUpon>MicrophoneViewItemWpfUserControl.xaml</DependentUpon></Compile>
