@@ -38,10 +38,10 @@ namespace AudioWaveformView.Client
                 foreach (TimeInterval interval in requested)
                 {
                     var areas = new List<TimelineDataArea>();
-                    if (preview != null)
+                    if (preview.HasValue)
                     {
-                        DateTime begin = interval.StartTime > preview.StartTime ? interval.StartTime : preview.Value.StartTime;
-                        DateTime end = interval.EndTime < preview.EndTime ? interval.EndTime : preview.Value.EndTime;
+                        DateTime begin = interval.StartTime > preview.Value.StartTime ? interval.StartTime : preview.Value.StartTime;
+                        DateTime end = interval.EndTime < preview.Value.EndTime ? interval.EndTime : preview.Value.EndTime;
                         if (begin < end)
                             areas.Add(new TimelineDataArea(new TimeInterval(begin, end)));
                     }
