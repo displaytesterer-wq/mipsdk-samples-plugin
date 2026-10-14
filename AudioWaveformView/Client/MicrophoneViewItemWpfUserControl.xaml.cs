@@ -253,7 +253,51 @@ namespace AudioWaveformView.Client
                 StatusText.Text = "Waveform preview is limited to five minutes. Narrow the selected range.";
                 return;
             }
-            await ExportAndLoadAsync(_manager.Microphone, startUtc, endUtc, false);
+            if (!await LoadDirectPcmWaveformAsync(_manager.Microphone, startUtc, endUtc))
+                await ExportAndLoadAsync(_manager.Microphone, startUtc, endUtc, false);
+        }
+
+        private async Task<bool> LoadDirectPcmWaveformAsync(Item microphone,
+            DateTime startUtc, DateTime endUtc)
+        {
+            if (_busy) { StatusText.Text = "Please wait for the current operation."; return true; }
+            _busy = true;
+            SetBusy(true);
+            _operation = new CancellationTokenSource();
+            try
+            {
+                StatusText.Text = "Reading PCM samples directly from the XProtect microphone...";
+                CancellationToken token = _operation.Token;
+                double[] directPeaks = await Task.Run(() =>
+                    PcmWaveformReader.Read(microphone, startUtc, endUtc, 600, token), token);
+                if (_closing) return true;
+                _player.Stop();
+                _player.Close();
+                DeletePreview();
+                _peaks = directPeaks;
+                DrawWaveform();
+                StatusText.Text = "Direct recorded PCM waveform loaded from microphone " +
+                    microphone.Name + ". Select the same playback time in Smart Client, " +
+                    "then choose Listen from XProtect. Export WAV remains available.";
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                if (!_closing) StatusText.Text = "PCM waveform cancelled.";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!_closing) StatusText.Text = "Direct PCM not available: " + ex.Message +
+                    ". Attempting WAV export fallback...";
+                return _closing;
+            }
+            finally
+            {
+                _busy = false;
+                if (!_closing) SetBusy(false);
+                if (_operation != null) { _operation.Dispose(); _operation = null; }
+            }
         }
 
         private async void Export_Click(object sender, RoutedEventArgs e)
@@ -338,6 +382,11 @@ namespace AudioWaveformView.Client
         {
             if (string.IsNullOrEmpty(_previewFile) || !File.Exists(_previewFile))
             {
+                if (_peaks != null && _peaks.Length > 0 && _manager.Microphone != null)
+                {
+                    ServerListen_Click(sender, e);
+                    return;
+                }
                 StatusText.Text = "Load a waveform first.";
                 return;
             }
@@ -349,6 +398,7 @@ namespace AudioWaveformView.Client
         private void Stop_Click(object sender, RoutedEventArgs e)
         {
             _player.Stop();
+            DisconnectServerAudio();
             StatusText.Text = "Playback stopped.";
         }
 
