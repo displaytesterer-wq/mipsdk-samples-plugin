@@ -1,0 +1,56 @@
+<platform:ViewItemWpfUserControl
+    x:Class="AudioWaveformView.Client.MicrophoneViewItemWpfUserControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:platform="clr-namespace:VideoOS.Platform.Client;assembly=VideoOS.Platform"
+    MinWidth="380" MinHeight="250">
+    <Grid Background="#16222d" Margin="0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" Margin="12,12,12,6">
+            <Button x:Name="SelectMicrophoneButton" Content="Choose microphone" Click="SelectMicrophone_Click"
+                    Padding="10,7" MinWidth="145" DockPanel.Dock="Right"/>
+            <StackPanel>
+                <TextBlock Text="MICROPHONE WAVEFORM" FontSize="15" FontWeight="Bold" Foreground="#eaf2f9"/>
+                <TextBlock x:Name="SelectedMicrophoneText" Text="No microphone selected"
+                           Foreground="#b2c0cb" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+        </DockPanel>
+        <Grid Grid.Row="1" Margin="12,0,12,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="From (local)" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="FromText" Grid.Column="1" MinWidth="135" Padding="5" ToolTip="yyyy-MM-dd HH:mm:ss"/>
+            <TextBlock Grid.Column="2" Text="To (local)" Foreground="White" VerticalAlignment="Center" Margin="12,0,8,0"/>
+            <TextBox x:Name="ToText" Grid.Column="3" MinWidth="135" Padding="5" ToolTip="yyyy-MM-dd HH:mm:ss"/>
+        </Grid>
+        <Grid Grid.Row="2" Margin="12,0,12,6" Background="#0e1721">
+            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Canvas x:Name="WaveformCanvas" Background="Transparent"
+                    SizeChanged="WaveformCanvas_SizeChanged"
+                    MouseLeftButtonDown="WaveformCanvas_MouseLeftButtonDown"/>
+            <Grid Grid.Row="1" Margin="5,2,5,5">
+                <TextBlock Text="Preview clip start" HorizontalAlignment="Left" Foreground="#849aa9" FontSize="10"/>
+                <TextBlock Text="Click waveform to seek" HorizontalAlignment="Center" Foreground="#849aa9" FontSize="10"/>
+                <TextBlock Text="Preview clip end" HorizontalAlignment="Right" Foreground="#849aa9" FontSize="10"/>
+            </Grid>
+        </Grid>
+        <WrapPanel Grid.Row="3" HorizontalAlignment="Center" Margin="12,3,12,8">
+            <Button x:Name="PreviewButton" Content="Load waveform (max 5 min)" Click="Preview_Click" Padding="9,7" Margin="3"/>
+            <Button x:Name="PlayButton" Content="▶ Play" Click="Play_Click" Padding="9,7" Margin="3"/>
+            <Button x:Name="StopButton" Content="■ Stop" Click="Stop_Click" Padding="9,7" Margin="3"/>
+            <Button x:Name="ExportButton" Content="Export WAV" Click="Export_Click" Padding="9,7" Margin="3"/>
+        </WrapPanel>
+        <TextBlock x:Name="StatusText" Grid.Row="4" Text="Choose any XProtect microphone; no camera required."
+                   Foreground="#b2c0cb" Margin="12,0,12,12" TextWrapping="Wrap"/>
+    </Grid>
+</platform:ViewItemWpfUserControl>
