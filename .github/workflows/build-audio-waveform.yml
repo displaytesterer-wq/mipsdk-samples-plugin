@@ -1,0 +1,37 @@
+name: Build AudioWaveformView
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "AudioWaveformView/**"
+      - "src/**"
+      - ".github/workflows/build-audio-waveform.yml"
+  pull_request:
+    paths:
+      - "AudioWaveformView/**"
+      - "src/**"
+      - ".github/workflows/build-audio-waveform.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build AudioWaveformView
+        run: >
+          msbuild AudioWaveformView/AudioWaveformView.csproj
+          /restore
+          /t:Build
+          /p:Configuration=Release
+          /p:Platform=AnyCPU
+      - name: Upload plugin files
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioWaveformView-Release
+          path: AudioWaveformView/bin/Release/
+          if-no-files-found: error
