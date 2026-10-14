@@ -36,6 +36,7 @@
     <Compile Include="Client\MicrophoneViewItemPlugin.cs"/>
     <Compile Include="Client\MicrophoneViewItemManager.cs"/>
     <Compile Include="Client\RecordingIntervalProvider.cs"/>
+    <Compile Include="Client\PcmRecordingProbe.cs"/>
     <Compile Include="Client\RecordingTimelineSource.cs"/>
     <Compile Include="Client\WavExportService.cs"/>
     <Compile Include="Client\WavPeakReader.cs"/>
