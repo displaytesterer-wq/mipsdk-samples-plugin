@@ -14,7 +14,7 @@ namespace AudioWaveformView.Client
     {
         private readonly Guid _id = Guid.NewGuid();
         private readonly object _sync = new object();
-        private TimeInterval? _preview;
+        private TimeInterval _preview;
 
         public override Guid Id { get { return _id; } }
         public override TimelineSequenceSourceType SourceType { get { return TimelineSequenceSourceType.Ribbon; } }
@@ -38,10 +38,10 @@ namespace AudioWaveformView.Client
                 foreach (TimeInterval interval in requested)
                 {
                     var areas = new List<TimelineDataArea>();
-                    if (preview.HasValue)
+                    if (preview != null)
                     {
-                        DateTime begin = interval.StartTime > preview.Value.StartTime ? interval.StartTime : preview.Value.StartTime;
-                        DateTime end = interval.EndTime < preview.Value.EndTime ? interval.EndTime : preview.Value.EndTime;
+                        DateTime begin = interval.StartTime > preview.StartTime ? interval.StartTime : preview.Value.StartTime;
+                        DateTime end = interval.EndTime < preview.EndTime ? interval.EndTime : preview.Value.EndTime;
                         if (begin < end)
                             areas.Add(new TimelineDataArea(new TimeInterval(begin, end)));
                     }
