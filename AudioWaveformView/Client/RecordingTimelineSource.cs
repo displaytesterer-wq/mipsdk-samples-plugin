@@ -46,7 +46,7 @@ namespace AudioWaveformView.Client
             }
         }
 
-        public RecordingIntervalProvider.Result QuerySelected(DateTime startUtc, DateTime endUtc, CancellationToken userToken)
+        internal RecordingIntervalProvider.Result QuerySelected(DateTime startUtc, DateTime endUtc, CancellationToken userToken)
         {
             Item selected;
             CancellationToken selectionToken;
