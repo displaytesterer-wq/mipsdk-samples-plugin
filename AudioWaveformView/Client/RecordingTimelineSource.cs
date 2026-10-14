@@ -28,7 +28,7 @@ namespace AudioWaveformView.Client
         public event Action<string> StatusChanged;
         public override Guid Id { get { return _id; } }
         public override TimelineSequenceSourceType SourceType { get { return TimelineSequenceSourceType.Ribbon; } }
-        public override string Title { get { return "Microphone recordings (server sequence index)"; } }
+        public override string Title { get { return "Microphone audio (server sequences / verified PCM)"; } }
         public override Brush RibbonContentColorBrush { get { return Brushes.MediumSeaGreen; } }
         public string LastStatus { get { lock (_sync) return _lastStatus; } }
 
@@ -58,10 +58,58 @@ namespace AudioWaveformView.Client
             if (selected == null) throw new InvalidOperationException("Select a microphone first.");
             using (var joined = CancellationTokenSource.CreateLinkedTokenSource(userToken, selectionToken))
             {
-                RecordingIntervalProvider.Result result = RecordingIntervalProvider.Query(
+                RecordingIntervalProvider.Result result = QueryWithPcmFallback(
                     selected, startUtc, endUtc, joined.Token);
                 PublishStatus(result.Supported ? result.Message : "Recording index unsupported: " + result.Message);
                 return result;
+            }
+        }
+
+        // SequenceDataSource may not expose recording intervals for standalone microphones,
+        // even though native Smart Client Audio and PcmAudioSource can play them.
+        // Fall back to positively verified decoded PCM audio frames within short windows.
+        // Never claim a window was searched unless PcmAudioSource actually returned frames.
+        private static RecordingIntervalProvider.Result QueryWithPcmFallback(
+            Item microphone, DateTime startUtc, DateTime endUtc, CancellationToken token)
+        {
+            RecordingIntervalProvider.Result index = null;
+            string originalError = null;
+            try
+            {
+                index = RecordingIntervalProvider.Query(microphone, startUtc, endUtc, token);
+                if (index.Supported && index.Intervals.Count > 0) return index;
+                originalError = index.Message;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                originalError = "Sequence index error: " + ex.Message;
+            }
+            if (endUtc - startUtc > PcmRecordingProbe.MaxSpan)
+            {
+                return index ?? new RecordingIntervalProvider.Result
+                {
+                    Supported = false,
+                    Message = originalError + ". Zoom to 5 minutes to try direct PCM microphone data."
+                };
+            }
+            try
+            {
+                var pcm = PcmRecordingProbe.Query(microphone, startUtc, endUtc, token);
+                if (pcm.Supported) return pcm;
+                pcm.Message = "Recording sequence: " + originalError +
+                    "; direct PCM: " + pcm.Message;
+                return pcm;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                return new RecordingIntervalProvider.Result
+                {
+                    Supported = false,
+                    Message = "Recording sequence: " + originalError +
+                        "; direct PCM lookup failed: " + ex.Message
+                };
             }
         }
 
@@ -109,7 +157,7 @@ namespace AudioWaveformView.Client
                         foreach (var window in requested)
                         {
                             selectionToken.ThrowIfCancellationRequested();
-                            RecordingIntervalProvider.Result query = RecordingIntervalProvider.Query(
+                            RecordingIntervalProvider.Result query = QueryWithPcmFallback(
                                 selected, window.StartTime, window.EndTime, selectionToken);
                             if (!query.Supported)
                             {
