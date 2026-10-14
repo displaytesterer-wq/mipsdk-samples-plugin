@@ -58,6 +58,8 @@
             </Grid>
         </Grid>
         <WrapPanel Grid.Row="4" HorizontalAlignment="Center" Margin="12,3,12,8">
+            <Button x:Name="ServerListenButton" Content="Listen from XProtect" Click="ServerListen_Click" Padding="9,7" Margin="3"/>
+            <Button x:Name="ServerDisconnectButton" Content="Disconnect audio" Click="ServerDisconnect_Click" Padding="9,7" Margin="3"/>
             <Button x:Name="CheckRecordingButton" Content="Check recording times" Click="CheckRecording_Click" Padding="9,7" Margin="3"/>
             <Button x:Name="PreviewButton" Content="Load waveform (max 5 min)" Click="Preview_Click" Padding="9,7" Margin="3"/>
             <Button x:Name="PlayButton" Content="▶ Play" Click="Play_Click" Padding="9,7" Margin="3"/>
