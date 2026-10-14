@@ -83,10 +83,11 @@ namespace AudioWaveformView.Client
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     DateTime chunkEnd = endUtc - cursor < ChunkSize ? endUtc : cursor.Add(ChunkSize);
-                    TimeSpan before = cursor - DateTime.MinValue.ToUniversalTime() < BoundaryLookback
-                        ? cursor - DateTime.MinValue.ToUniversalTime() : BoundaryLookback;
+                    TimeSpan before = BoundaryLookback;
                     // Query centered at each chunk's beginning with lookback to catch
-                    // intervals that started shortly before the viewport.
+                    // intervals that started shortly before the viewport. For sources whose
+                    // recording sequences can span more than 24 hours, the completeness of
+                    // this result must be verified against that source's server behavior.
                     List<object> data = source.GetData(cursor,
                         before, MaxItemsPerDirection,
                         chunkEnd - cursor, MaxItemsPerDirection,
