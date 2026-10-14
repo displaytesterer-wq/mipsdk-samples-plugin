@@ -72,34 +72,45 @@ namespace AudioWaveformView.Client
         private static RecordingIntervalProvider.Result QueryWithPcmFallback(
             Item microphone, DateTime startUtc, DateTime endUtc, CancellationToken token)
         {
-            RecordingIntervalProvider.Result index = null;
-            string originalError = null;
+            // The native Smart Client Audio pane may play a microphone even when
+            // camera/metadata recording-sequence queries return no index.
+            // For a short window, use decoded microphone audio packets FIRST,
+            // because these carry actual playback timestamps and require no camera.
+            string pcmError = null;
+            bool shortWindow = endUtc - startUtc <= PcmRecordingProbe.MaxSpan;
+            if (shortWindow)
+            {
+                try
+                {
+                    var pcm = PcmRecordingProbe.Query(microphone, startUtc, endUtc, token);
+                    if (pcm.Supported && pcm.Intervals.Count > 0) return pcm;
+                    pcmError = pcm.Message;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    pcmError = "Direct microphone PCM unavailable: " + ex.Message;
+                }
+            }
             try
             {
-                index = RecordingIntervalProvider.Query(microphone, startUtc, endUtc, token);
-                if (index.Supported && index.Intervals.Count > 0) return index;
-                originalError = index.Message;
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                originalError = "Sequence index error: " + ex.Message;
-            }
-            if (endUtc - startUtc > PcmRecordingProbe.MaxSpan)
-            {
-                return index ?? new RecordingIntervalProvider.Result
+                var indexed = RecordingIntervalProvider.Query(microphone, startUtc, endUtc, token);
+                if (indexed.Supported && indexed.Intervals.Count > 0)
+                {
+                    if (shortWindow)
+                        indexed.Message = "PCM probe: " + pcmError +
+                            "; recording-sequence fallback: " + indexed.Message;
+                    return indexed;
+                }
+                return new RecordingIntervalProvider.Result
                 {
                     Supported = false,
-                    Message = originalError + ". Zoom to 5 minutes to try direct PCM microphone data."
+                    Message = (shortWindow
+                        ? "PCM probe: " + pcmError + "; recording sequence: "
+                        : "Recording sequence: ") +
+                        indexed.Message +
+                        (shortWindow ? "" : ". Zoom to at most 5 minutes for direct microphone PCM verification.")
                 };
-            }
-            try
-            {
-                var pcm = PcmRecordingProbe.Query(microphone, startUtc, endUtc, token);
-                if (pcm.Supported) return pcm;
-                pcm.Message = "Recording sequence: " + originalError +
-                    "; direct PCM: " + pcm.Message;
-                return pcm;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -107,8 +118,9 @@ namespace AudioWaveformView.Client
                 return new RecordingIntervalProvider.Result
                 {
                     Supported = false,
-                    Message = "Recording sequence: " + originalError +
-                        "; direct PCM lookup failed: " + ex.Message
+                    Message = (shortWindow ? "PCM probe: " + pcmError + "; " : "") +
+                        "sequence index error: " + ex.Message +
+                        (shortWindow ? "" : ". Zoom to 5 minutes for direct microphone PCM.")
                 };
             }
         }
