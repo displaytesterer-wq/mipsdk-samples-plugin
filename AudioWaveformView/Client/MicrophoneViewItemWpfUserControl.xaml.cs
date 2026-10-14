@@ -91,7 +91,7 @@ namespace AudioWaveformView.Client
         private bool TryGetRange(out DateTime start, out DateTime end)
         {
             start = end = DateTime.MinValue;
-            DateTime localStart, localEnd;
+            DateTime localStart = DateTime.MinValue, localEnd = DateTime.MinValue;
             const string format = "yyyy-MM-dd HH:mm:ss";
             bool parsed = DateTime.TryParseExact(FromText.Text.Trim(), format,
                 CultureInfo.InvariantCulture, DateTimeStyles.None, out localStart)
@@ -201,7 +201,7 @@ namespace AudioWaveformView.Client
             }
             finally
             {
-                if (newFile != null) WavExportService.TryDeleteFolder(Path.GetDirectoryName(newFile));
+                if (newFile != null) WavExportService.TryDeleteFolder(System.IO.Path.GetDirectoryName(newFile));
                 if (!_closing) SetBusy(false);
                 _busy = false;
                 if (_operation != null) { _operation.Dispose(); _operation = null; }
@@ -235,7 +235,7 @@ namespace AudioWaveformView.Client
         private void DeletePreview()
         {
             if (string.IsNullOrEmpty(_previewFile)) return;
-            string folder = Path.GetDirectoryName(_previewFile);
+            string folder = System.IO.Path.GetDirectoryName(_previewFile);
             _previewFile = null;
             WavExportService.TryDeleteFolder(folder);
         }
