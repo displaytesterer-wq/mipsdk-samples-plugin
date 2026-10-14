@@ -1,52 +1,65 @@
-# AudioWaveformView (camera-free microphone) — preview implementation
+# AudioWaveformView: standalone microphones, recorded sequence timeline, WAV waveform and export
 
-This is an experimental Smart Client MIP SDK view item for **XProtect microphones, including microphone-only devices**. It does **not** require a camera association. Built independently from the existing, working `SCAudioExport` project.
+**Status: compiles in GitHub Actions; requires validation on an actual XProtect 2025 R3 Recording Server and microphone-only device before production use.**
 
-## Capabilities in this version
+## What it does
 
-- Insert a **Microphone Waveform** view item in Smart Client Setup.
-- Select a microphone through `Kind.Microphone` and `Configuration.Instance.GetItemsByKind(Kind.Microphone)`. No `CameraList` or camera `GetRelated()`.
-- Choose a local-time recording range and export it as WAV with `WAVExporter`.
-- Load up to five minutes of recorded audio as a WAV **preview**, plot the PCM amplitude envelope, play/stop the WAV and click to seek within it.
-- Supply an **additional ribbon** to the Smart Client main timeline through `ViewItemManager.TimelineSequenceSources`. This ribbon represents only the WAV **preview interval**, not all Recording Server audio recordings.
+This is a separate Smart Client MIP SDK ViewItem for microphones **without any camera relationship**, including AXIS P8221 and other XProtect `Kind.Microphone` devices.
 
-## Important limitations
+1. Select a microphone directly from `Configuration.Instance.GetItemsByKind(Kind.Microphone)`. No camera lookup, camera `GetRelated()`, `CameraList`, Axis-specific API, or dummy video stream.
+2. Show a **server-indexed recording availability strip** above the WAV waveform in the custom View. The strip is populated by real `SequenceDataSource(microphone)` queries for the selected time range. Green bars represent only intervals that the server reports. Each bar tooltip shows its exact local start and end. Unindexed / unsupported ranges are not silently painted green.
+3. Populate a **Smart Client Additional data ribbon** by implementing `ViewItemManager.TimelineSequenceSources` and `TimelineSequenceSource.StartGetSequences`. It retrieves the requested visible time windows on demand from the same microphone sequence index, rather than showing fabricated 1-minute or entire-preview intervals.
+4. Load a short recorded WAV (maximum five minutes) to generate a PCM amplitude waveform, play and seek within the WAV.
+5. Export a selected recorded range as WAV using `WAVExporter` (based on the existing working `SCAudioExport` example). The original `SCAudioExport` project has not been edited.
 
-1. **Not yet validated against the live XProtect 2025 R3 server/device**. A successful GitHub Actions build means the code compiles, not that P8221 or other devices were integration-tested.
-2. The existing `SCAudioExport` project is unchanged. This new view independently reuses the same `WAVExporter` API.
-3. The **standard native microphone recording track** in the Smart Client main Playback timeline is **not modified** by this plugin. Additional data needs to be enabled in Smart Client timeline settings to show the preview ribbon.
-4. This is not a complete server-side recording index. Displaying every recorded segment requires an independently validated sequence retrieval API for microphone-only sources. Do not treat the blue preview ribbon as proof of uninterrupted recording.
-5. WAV decoding here supports RIFF WAVE PCM 8/16/24/32-bit or IEEE 32-bit float, not compressed audio formats. If XProtect offers multiple codecs, select the codec yielding a standard PCM WAV for waveform preview. Export of another supported WAV codec can still succeed while waveform decoding is unsupported.
-6. The waveform is rendered from an exported temporary WAV file (up to five minutes) and therefore starts after the temporary WAV export completes. Playback is local WPF media playback of that file, not the live `AudioPlayer` stream.
-7. Export is synchronous within a dedicated background task; large exports can take time. This prototype uses a 5-minute watchdog for exports, which should be redesigned for very large exports.
+## Crucial differences between timeline and waveform
 
-## Build
+- The green **server recording strips** and **Additional data timeline ribbon** show the *recording-index time intervals*, **not** an audio amplitude waveform.
+- The teal **waveform** displays amplitude sampled from the exported WAV excerpt, currently maximum five minutes.
+- The plugin **does not insert a native microphone recording track** into the built-in XProtect recording track. The main timeline output is an **Additional data ribbon** attached to this plugin ViewItem; enable Smart Client settings **Timeline > Additional data > Show** and reselect the View or navigate to a time period.
+- The entire 90-day retention period is **not exported into one WAV** and **not downloaded all at startup**. The timeline requests visible time windows from the server on demand. The View can probe manually selected ranges.
 
-The repository includes [Build AudioWaveformView](../.github/workflows/build-audio-waveform.yml), a Windows GitHub Actions workflow (MSBuild, .NET Framework 4.7 and Milestone SDK package). Download the `AudioWaveformView-Release` artifact once the workflow succeeds.
+## How the server recording index works
 
-## Install for a test workstation
+The SDK's `SequenceDataSource.GetTypes()` documents valid sequence types for **Camera/Microphone/Speaker**. The provider prefers `DataType.SequenceTypeGuids.TimelineRecording` (recorded data availability) and falls back to `RecordingSequence` only when the chosen type is listed by that microphone's server.
 
-1. Keep the original `SCAudioExport` plugin installed.
-2. Extract `AudioWaveformView-Release` into a **separate** plugin folder in the Smart Client plugin directory (e.g. `MIPPlugins/AudioWaveformView`; verify the installation-specific MIPPlugins path).
-3. Verify `plugin.def` sits next to `AudioWaveformView.dll` and required dependency assemblies.
-4. Restart Smart Client. In Setup, add a view item named **Microphone Waveform**.
-5. Select a *standalone microphone* (P8221 or another manufacturer), choose a short known recorded interval, click **Load waveform**.
-6. Verify WAV playback, generated envelope and export of the same interval; check Smart Client settings: Timeline > Additional data > Show for the experimental preview ribbon.
-7. Compare the preview with playback/audio evidence, including gaps and silent portions.
+It then queries the microphone Item in 6-hour chunks with a 24-hour preceding lookup overlap. Only the intersection of each returned `SequenceData.EventSequence.StartDateTime/EndDateTime` and the requested time window is displayed. Adjacent exact intervals are merged, **real gaps are retained**, and query exceptions, unsupported sequence types, or likely truncation are surfaced as failures instead of inventing recording spans.
 
-## Next verification milestones
+**Important:** Whether the XProtect 2025 R3 server *actually exposes* reliable `TimelineRecording` or `RecordingSequence` for the camera-free P8221 is not known until running the test on that server. The SDK docs mention microphones, but this isn't proof a specific recorder will return complete audio intervals. The 24-hour lookback also requires validation for exceptionally long single recording sequences; otherwise an overlap that starts more than a day before a requested window might be omitted. The query count cap protects the server but means exceptionally dense sequences can fail closed.
 
-- Verify the chosen output codec is parseable by the preview waveform implementation on XProtect 2025 R3.
-- Confirm standalone microphone enumeration in the actual system and test recording permission errors.
-- Add genuine `AudioPlayer` live/recorded streaming and XProtect playback synchronization, without camera lookup.
-- Probe `SequenceDataSource(microphone)` and its `GetTypes()` on a real recording server to identify whether audio recording segments can be obtained and shown as accurate ribbons rather than preview-only ribbons.
-- Replace temporary full-file waveform generation with chunked/pyramid cache for long spans; improve task cancellation, retention and error reporting.
+A successful build confirms only C#/XAML/API compilation, not accuracy of the recording index on your production server.
 
-## Source design choices
+## Building from GitHub (no local Visual Studio required)
 
-- `SCAudioExport/Client/SCAudioExportSidePanelWpfUserControl.xaml.cs`: standalone `Kind.Microphone` + `WAVExporter`.
-- `SCIndependentPlayback/Client/SCIndependentPlaybackViewItemWpfUserControl.xaml.cs`: independent playback controller, but **uses camera.GetRelated()**; do not copy that camera dependency.
-- `TimelineViewItem/Client/TimelineViewItemViewItemManager.cs`: supplies `TimelineSequenceSources` from a custom ViewItem.
-- `TimelineViewItem/Client/TimelineRibbonSource.cs`: ribbon sequencing API, but **returns synthetic intervals**. Our ribbon returns only the chosen preview interval.
+GitHub Actions workflow: [Build AudioWaveformView](../.github/workflows/build-audio-waveform.yml)
 
-**Status: experimental, do not deploy as a production evidentiary or forensic recording index without validation.**
+- Checkout repository source
+- Run Windows MSBuild against `AudioWaveformView/AudioWaveformView.csproj`
+- Upload an `AudioWaveformView-Release` artifact containing `AudioWaveformView.dll`, `plugin.def` and dependencies.
+
+## Installation and on-server verification
+
+1. Download the latest successful `AudioWaveformView-Release` artifact from Actions.
+2. Extract into a **separate** Smart Client MIPPlugins subfolder alongside `plugin.def` (verify the correct MIPPlugins path for the installed client). Leave the existing `SCAudioExport` deployment unchanged.
+3. Restart Smart Client, enter Setup, and add the **Microphone Waveform** view item to a View.
+4. Select **P8221** directly, with **no camera association**. Set a local-time interval for which you already verified audio recording exists (e.g. a portion of yesterday).
+5. Click **Check recording times**. If the server supports microphone sequences, green bars appear in the local strip and an interval count plus used sequence type is shown.
+6. Show the Smart Client timeline's **Additional data** setting, navigate to that interval, and confirm the plugin ribbon follows the actual indexed spans (it is not the standard green/red camera track).
+7. Choose a small recorded interval (up to five minutes), click **Load waveform**, listen with **Play** and verify amplitude bars. Try **Export WAV** and compare the output with the existing working `SCAudioExport`.
+8. Check a **known recording gap**, date/time zone boundaries, a date outside retention, and a long continuously recording day. Compare the server-index spans with observed playback. **No false green bars and no omitted known recordings** is the acceptance criterion.
+9. If the plugin reports `unsupported`, an SDK error, or zero intervals despite audible stored audio, do **not** assume no recordings exist. Verify microphone **Read sequences**, Playback and Export role rights, and capture the status text; microphone server index support may need an alternate SDK/API path.
+
+## Non-production caveats
+
+- Playback of short exported WAV excerpts uses WPF `MediaPlayer`, **not** a direct live `AudioPlayer` feed or native Smart Client playback synchronization. Those remain future enhancements.
+- PCM/IEEE-float WAVE files can generate waveform peaks; unsupported compressed WAV codecs give an explicit decoding error.
+- The export helper has a five-minute watchdog. Very large exports need a different timeout/cancellation model.
+- Forensic or production evidence use requires actual server/device verification of sequence coverage and permissions before deployment.
+
+## Milestone API documentation
+
+- [SequenceDataSource](https://doc.developer.milestonesys.com/mipsdk/miphelp/class_video_o_s_1_1_platform_1_1_data_1_1_sequence_data_source.html) — `GetTypes`, `GetData`, microphone type support.
+- [EventSequence](https://doc.developer.milestonesys.com/mipsdk/miphelp/class_video_o_s_1_1_platform_1_1_data_1_1_event_sequence.html) — `StartDateTime` / `EndDateTime`.
+- [TimelineSequenceSource](https://doc.developer.milestonesys.com/mipsdk/miphelp/class_video_o_s_1_1_platform_1_1_client_1_1_timeline_sequence_source.html) — view-item Additional data ribbon.
+- [TimelineViewItem sample](../TimelineViewItem/README.md) — view item ribbons/markers.
+- [SCAudioExport sample](../SCAudioExport/README.md) — audio-only WAV export.
