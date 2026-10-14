@@ -14,6 +14,7 @@ using Microsoft.Win32;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
 using VideoOS.Platform.UI;
+using VideoOS.Platform.Util;
 
 namespace AudioWaveformView.Client
 {
@@ -30,6 +31,9 @@ namespace AudioWaveformView.Client
         private double[] _peaks = new double[0];
         private bool _closing;
         private bool _busy;
+        private DateTime _recordingStartUtc, _recordingEndUtc;
+        private List<TimeInterval> _recordingIntervals = new List<TimeInterval>();
+        private bool _recordingQueryCompleted;
 
         public MicrophoneViewItemWpfUserControl(MicrophoneViewItemManager manager)
         {
@@ -46,6 +50,7 @@ namespace AudioWaveformView.Client
                 ? "No microphone selected"
                 : _manager.Microphone.Name;
             _player.MediaFailed += Player_MediaFailed;
+            _manager.Timeline.StatusChanged += Timeline_StatusChanged;
         }
 
         public override void Close()
@@ -55,11 +60,21 @@ namespace AudioWaveformView.Client
             _player.Stop();
             _player.Close();
             _player.MediaFailed -= Player_MediaFailed;
+            _manager.Timeline.StatusChanged -= Timeline_StatusChanged;
             DeletePreview();
         }
 
         public override bool Selectable { get { return true; } }
         public override bool Maximizable { get { return true; } }
+
+        private void Timeline_StatusChanged(string message)
+        {
+            if (_closing) return;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!_closing && !_busy) StatusText.Text = message;
+            }));
+        }
 
         private void Player_MediaFailed(object sender, ExceptionEventArgs e)
         {
@@ -83,6 +98,10 @@ namespace AudioWaveformView.Client
             DeletePreview();
             _peaks = new double[0];
             _manager.Microphone = chosen;
+            _recordingIntervals.Clear();
+            _recordingQueryCompleted = false;
+            RecordingInfoText.Text = "Not queried for this microphone";
+            DrawRecordingIntervals();
             SelectedMicrophoneText.Text = chosen.Name;
             DrawWaveform();
             StatusText.Text = "Selected microphone: " + chosen.Name;
@@ -110,6 +129,65 @@ namespace AudioWaveformView.Client
             start = DateTime.SpecifyKind(localStart, DateTimeKind.Local).ToUniversalTime();
             end = DateTime.SpecifyKind(localEnd, DateTimeKind.Local).ToUniversalTime();
             return true;
+        }
+
+        private async void CheckRecording_Click(object sender, RoutedEventArgs e)
+        {
+            if (_manager.Microphone == null)
+            {
+                StatusText.Text = "Select a microphone first.";
+                return;
+            }
+            DateTime startUtc, endUtc;
+            if (!TryGetRange(out startUtc, out endUtc)) return;
+            if (_busy)
+            {
+                StatusText.Text = "Please wait for the current operation.";
+                return;
+            }
+
+            _busy = true;
+            SetBusy(true);
+            _operation = new CancellationTokenSource();
+            try
+            {
+                StatusText.Text = "Querying recording sequences for the selected microphone...";
+                CancellationToken token = _operation.Token;
+                var query = await Task.Run(() =>
+                    _manager.Timeline.QuerySelected(startUtc, endUtc, token), token);
+                if (_closing) return;
+
+                _recordingIntervals = query.Supported
+                    ? query.Intervals
+                    : new List<TimeInterval>();
+                _recordingQueryCompleted = query.Supported;
+                _recordingStartUtc = startUtc;
+                _recordingEndUtc = endUtc;
+                RecordingInfoText.Text = query.Supported
+                    ? query.Intervals.Count + " exact server interval(s) / " + query.Requests + " request(s)"
+                    : "Unsupported sequence index";
+                DrawRecordingIntervals();
+                StatusText.Text = query.Supported ? query.Message
+                    : "Cannot verify recording intervals: " + query.Message;
+            }
+            catch (OperationCanceledException)
+            {
+                if (!_closing) StatusText.Text = "Recording index query cancelled.";
+            }
+            catch (Exception ex)
+            {
+                _recordingIntervals.Clear();
+                _recordingQueryCompleted = false;
+                RecordingInfoText.Text = "Recording index query failed";
+                DrawRecordingIntervals();
+                if (!_closing) StatusText.Text = "Recording index unavailable: " + ex.Message;
+            }
+            finally
+            {
+                if (!_closing) SetBusy(false);
+                _busy = false;
+                if (_operation != null) { _operation.Dispose(); _operation = null; }
+            }
         }
 
         private async void Preview_Click(object sender, RoutedEventArgs e)
@@ -184,12 +262,11 @@ namespace AudioWaveformView.Client
                 newFile = null;
                 _peaks = peaks;
                 _player.Open(new Uri(_previewFile, UriKind.Absolute));
-                _manager.Timeline.SetPreview(startUtc, endUtc);
-                DrawWaveform();
+                                DrawWaveform();
                 StatusText.Text = "Loaded recorded WAV preview from " +
                     startUtc.ToLocalTime().ToString("HH:mm:ss") + " to " +
                     endUtc.ToLocalTime().ToString("HH:mm:ss") +
-                    ". Blue timeline ribbon indicates this preview only.";
+                    ". Recording intervals come from the server index, not the exported WAV.";
             }
             catch (OperationCanceledException)
             {
@@ -228,6 +305,7 @@ namespace AudioWaveformView.Client
         private void SetBusy(bool busy)
         {
             SelectMicrophoneButton.IsEnabled = !busy;
+            CheckRecordingButton.IsEnabled = !busy;
             PreviewButton.IsEnabled = !busy;
             ExportButton.IsEnabled = !busy;
         }
@@ -238,6 +316,42 @@ namespace AudioWaveformView.Client
             string folder = System.IO.Path.GetDirectoryName(_previewFile);
             _previewFile = null;
             WavExportService.TryDeleteFolder(folder);
+        }
+
+        private void RecordingCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            DrawRecordingIntervals();
+        }
+
+        private void DrawRecordingIntervals()
+        {
+            if (RecordingCanvas == null) return;
+            RecordingCanvas.Children.Clear();
+            double width = RecordingCanvas.ActualWidth;
+            double height = RecordingCanvas.ActualHeight;
+            if (!_recordingQueryCompleted || width <= 0 || height <= 0 ||
+                _recordingEndUtc <= _recordingStartUtc) return;
+
+            double totalTicks = (_recordingEndUtc - _recordingStartUtc).Ticks;
+            foreach (TimeInterval span in _recordingIntervals)
+            {
+                double x = (span.StartTime - _recordingStartUtc).Ticks / totalTicks * width;
+                double end = (span.EndTime - _recordingStartUtc).Ticks / totalTicks * width;
+                x = Math.Max(0, Math.Min(width, x));
+                end = Math.Max(0, Math.Min(width, end));
+                if (end <= x) continue;
+                var bar = new Rectangle
+                {
+                    Width = Math.Max(0.5, end - x),
+                    Height = height,
+                    Fill = new SolidColorBrush(Color.FromRgb(57, 180, 118)),
+                    ToolTip = span.StartTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") +
+                        " — " + span.EndTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                };
+                Canvas.SetLeft(bar, x);
+                Canvas.SetTop(bar, 0);
+                RecordingCanvas.Children.Add(bar);
+            }
         }
 
         private void WaveformCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
