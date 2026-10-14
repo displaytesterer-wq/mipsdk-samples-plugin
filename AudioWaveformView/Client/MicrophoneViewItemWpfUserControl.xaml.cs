@@ -139,7 +139,7 @@ namespace AudioWaveformView.Client
                 _serverAudioPlayer.PlaybackControllerFQID = null;
                 _serverAudioPlayer.Initialize();
                 _serverAudioPlayer.Connect();
-                StatusText.Text = "Connected direct AudioPlayer to " + _manager.Microphone.Name +
+                StatusText.Text = "AudioPlayer connection requested for " + _manager.Microphone.Name +
                     ". Follow Smart Client's Live/Playback controls. Connection state: " +
                     _serverAudioPlayer.ConnectionState;
             }
@@ -213,7 +213,7 @@ namespace AudioWaveformView.Client
                 _recordingStartUtc = startUtc;
                 _recordingEndUtc = endUtc;
                 RecordingInfoText.Text = query.Supported
-                    ? query.Intervals.Count + " exact server interval(s) / " + query.Requests + " request(s)"
+                    ? query.Intervals.Count + " confirmed interval(s) / " + query.Requests + " request(s)"
                     : "Unsupported sequence index";
                 DrawRecordingIntervals();
                 StatusText.Text = query.Supported ? query.Message
