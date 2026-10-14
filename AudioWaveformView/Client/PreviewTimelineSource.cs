@@ -14,7 +14,7 @@ namespace AudioWaveformView.Client
     {
         private readonly Guid _id = Guid.NewGuid();
         private readonly object _sync = new object();
-        private TimeInterval _preview;
+        private TimeInterval? _preview;
 
         public override Guid Id { get { return _id; } }
         public override TimelineSequenceSourceType SourceType { get { return TimelineSequenceSourceType.Ribbon; } }
