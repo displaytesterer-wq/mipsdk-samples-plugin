@@ -26,6 +26,7 @@ namespace AudioWaveformView.Client
     {
         private readonly MicrophoneViewItemManager _manager;
         private readonly MediaPlayer _player = new MediaPlayer();
+        private VideoOS.Platform.Client.AudioPlayer _serverAudioPlayer;
         private CancellationTokenSource _operation;
         private string _previewFile;
         private double[] _peaks = new double[0];
@@ -60,6 +61,7 @@ namespace AudioWaveformView.Client
             _player.Stop();
             _player.Close();
             _player.MediaFailed -= Player_MediaFailed;
+            DisconnectServerAudio();
             _manager.Timeline.StatusChanged -= Timeline_StatusChanged;
             DeletePreview();
         }
@@ -95,6 +97,7 @@ namespace AudioWaveformView.Client
             var chosen = picker.SelectedItems.First();
             _player.Stop();
             _player.Close();
+            DisconnectServerAudio();
             DeletePreview();
             _peaks = new double[0];
             _manager.Microphone = chosen;
@@ -105,6 +108,52 @@ namespace AudioWaveformView.Client
             SelectedMicrophoneText.Text = chosen.Name;
             DrawWaveform();
             StatusText.Text = "Selected microphone: " + chosen.Name;
+        }
+
+        private void DisconnectServerAudio()
+        {
+            if (_serverAudioPlayer == null) return;
+            try { _serverAudioPlayer.Disconnect(); }
+            catch { }
+            try { _serverAudioPlayer.Close(); }
+            catch { }
+            _serverAudioPlayer = null;
+        }
+
+        private void ServerListen_Click(object sender, RoutedEventArgs e)
+        {
+            if (_manager.Microphone == null)
+            {
+                StatusText.Text = "Select a microphone first.";
+                return;
+            }
+            try
+            {
+                _player.Stop();
+                DisconnectServerAudio();
+                // Same microphone FQID used by Smart Client Audio > Microphones.
+                // null controller means the player's time follows Smart Client's
+                // main Playback controller in the main window.
+                _serverAudioPlayer = new VideoOS.Platform.Client.AudioPlayer();
+                _serverAudioPlayer.MicrophoneFQID = _manager.Microphone.FQID;
+                _serverAudioPlayer.PlaybackControllerFQID = null;
+                _serverAudioPlayer.Initialize();
+                _serverAudioPlayer.Connect();
+                StatusText.Text = "Connected direct AudioPlayer to " + _manager.Microphone.Name +
+                    ". Follow Smart Client's Live/Playback controls. Connection state: " +
+                    _serverAudioPlayer.ConnectionState;
+            }
+            catch (Exception ex)
+            {
+                DisconnectServerAudio();
+                StatusText.Text = "XProtect direct audio connection failed: " + ex.Message;
+            }
+        }
+
+        private void ServerDisconnect_Click(object sender, RoutedEventArgs e)
+        {
+            DisconnectServerAudio();
+            StatusText.Text = "XProtect direct audio disconnected.";
         }
 
         private bool TryGetRange(out DateTime start, out DateTime end)
@@ -292,6 +341,7 @@ namespace AudioWaveformView.Client
                 StatusText.Text = "Load a waveform first.";
                 return;
             }
+            DisconnectServerAudio();
             _player.Play();
             StatusText.Text = "Playing the selected WAV preview.";
         }
