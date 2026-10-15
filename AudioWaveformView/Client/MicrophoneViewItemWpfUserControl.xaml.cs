@@ -32,6 +32,7 @@ namespace AudioWaveformView.Client
         private double[] _peaks = new double[0];
         private bool _closing;
         private bool _busy;
+        private string _lastPcmFailure;
         private DateTime _recordingStartUtc, _recordingEndUtc;
         private List<TimeInterval> _recordingIntervals = new List<TimeInterval>();
         private bool _recordingQueryCompleted;
@@ -212,9 +213,13 @@ namespace AudioWaveformView.Client
                 _recordingQueryCompleted = query.Supported;
                 _recordingStartUtc = startUtc;
                 _recordingEndUtc = endUtc;
+                // A server sequence is not the same proof as retrieved PCM packets.
+                // Show the actual backend used, rather than calling all data "confirmed".
+                string sourceKind = query.SequenceType ?? "Unknown source";
                 RecordingInfoText.Text = query.Supported
-                    ? query.Intervals.Count + " confirmed interval(s) / " + query.Requests + " request(s)"
-                    : "Unsupported sequence index";
+                    ? query.Intervals.Count + " interval(s) / " + query.Requests +
+                        " request(s) [" + sourceKind + "]"
+                    : "Not verified [" + sourceKind + "]";
                 DrawRecordingIntervals();
                 StatusText.Text = query.Supported ? query.Message
                     : "Cannot verify recording intervals: " + query.Message;
@@ -270,6 +275,7 @@ namespace AudioWaveformView.Client
                 CancellationToken token = _operation.Token;
                 double[] directPeaks = await Task.Run(() =>
                     PcmWaveformReader.Read(microphone, startUtc, endUtc, 600, token), token);
+                _lastPcmFailure = null;
                 if (_closing) return true;
                 _player.Stop();
                 _player.Close();
@@ -288,8 +294,9 @@ namespace AudioWaveformView.Client
             }
             catch (Exception ex)
             {
-                if (!_closing) StatusText.Text = "Direct PCM not available: " + ex.Message +
-                    ". Attempting WAV export fallback...";
+                _lastPcmFailure = ex.GetType().Name + ": " + ex.Message;
+                if (!_closing) StatusText.Text = "Direct PCM unavailable: " + _lastPcmFailure +
+                    ". Trying WAV export...";
                 return _closing;
             }
             finally
@@ -367,7 +374,9 @@ namespace AudioWaveformView.Client
             }
             catch (Exception ex)
             {
-                if (!_closing) StatusText.Text = "Audio operation failed: " + ex.Message;
+                if (!_closing) StatusText.Text = "Audio operation failed: " + ex.Message +
+                    (exportToFile || string.IsNullOrEmpty(_lastPcmFailure)
+                        ? "" : " | Direct PCM: " + _lastPcmFailure);
             }
             finally
             {
