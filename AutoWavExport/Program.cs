@@ -1,0 +1,237 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using VideoOS.Platform;
+using VideoOS.Platform.Data;
+
+namespace AutoWavExport
+{
+    public sealed class Settings
+    {
+        public string ManagementServer { get; set; }
+        public string Username { get; set; }
+        public string PasswordFile { get; set; }
+        public string OutputRoot { get; set; }
+        public int SampleRate { get; set; }
+        public string Codec { get; set; }
+        public int ExportTimeoutMinutes { get; set; }
+        public int Retries { get; set; }
+        public bool DryRun { get; set; }
+        public Dictionary<string, string> HardwareNames { get; set; }
+    }
+
+    internal static class Program
+    {
+        static readonly Guid IntegrationId = new Guid("86F42E94-41B8-4F47-9E56-6A815A0C482F");
+        static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+
+        static int Main(string[] args)
+        {
+            using (var mutex = new Mutex(false, @"Local\MilestoneAutoWavExport"))
+            {
+                bool locked = false;
+                try
+                {
+                    locked = mutex.WaitOne(TimeSpan.FromSeconds(1));
+                    if (!locked) { Console.Error.WriteLine("Another export is active."); return 2; }
+                    return Run(args);
+                }
+                catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+                finally { if (locked) mutex.ReleaseMutex(); }
+            }
+        }
+
+        static int Run(string[] args)
+        {
+            string config = Opt(args, "--config") ?? "settings.json";
+            var s = Json.Deserialize<Settings>(File.ReadAllText(config, Encoding.UTF8));
+            if (s == null || string.IsNullOrWhiteSpace(s.ManagementServer) ||
+                string.IsNullOrWhiteSpace(s.OutputRoot) || string.IsNullOrWhiteSpace(s.PasswordFile))
+                throw new InvalidOperationException("Incomplete settings.json");
+            Directory.CreateDirectory(s.OutputRoot);
+            string logDirectory = Path.Combine(s.OutputRoot, "_logs");
+            Directory.CreateDirectory(logDirectory);
+            string logFile = Path.Combine(logDirectory, DateTime.Now.ToString("yyyy-MM-dd") + ".log");
+            Action<string> log = message =>
+            {
+                var line = DateTime.Now.ToString("o") + " " + message;
+                Console.WriteLine(line);
+                File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
+            };
+
+            DateTime end = (DateTime.Now.Date.AddHours((DateTime.Now.Hour / 6) * 6));
+            var specified = Opt(args, "--end");
+            if (!string.IsNullOrWhiteSpace(specified))
+                end = DateTime.ParseExact(specified, "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+            if (end.Minute != 0 || end.Second != 0 || end.Hour % 6 != 0 || end > DateTime.Now)
+                throw new ArgumentException("End must be a completed local 6-hour boundary.");
+            DateTime start = end.AddHours(-6);
+            Uri url = new Uri(s.ManagementServer);
+            if (url.Scheme != Uri.UriSchemeHttps) throw new InvalidOperationException("Use verified HTTPS Management Server URL.");
+            string password = ReadDpapiPassword(s.PasswordFile);
+            VideoOS.Platform.SDK.Environment.Initialize();
+            VideoOS.Platform.SDK.Export.Environment.Initialize();
+            try
+            {
+                var cc = VideoOS.Platform.Login.Util.BuildCredentialCache(url, s.Username ?? "exporter", password, "Basic");
+                VideoOS.Platform.SDK.Environment.AddServer(true, url, cc, true);
+                VideoOS.Platform.SDK.Environment.Login(url, IntegrationId, "Auto WAV Export", "0.1.0", "Internal", true);
+                var roots = Configuration.Instance.GetItemsByKind(Kind.Microphone, ItemHierarchy.SystemDefined);
+                var devices = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
+                foreach (var root in roots) Collect(root, devices, new HashSet<string>(), 0);
+                log("Inventory count: " + devices.Count);
+                bool inventory = args.Contains("--inventory");
+                string selected = Opt(args, "--device");
+                var mapping = s.HardwareNames ?? new Dictionary<string,string>();
+                foreach (var pair in devices.OrderBy(d => d.Key))
+                    log("MIC " + pair.Key + " name=" + pair.Value.Name + " folder=" +
+                        (mapping.ContainsKey(pair.Key) ? mapping[pair.Key] : "MIC_" + pair.Key));
+                if (inventory) return 0;
+                if (devices.Count == 0) { log("ERROR no microphones discovered"); return 3; }
+                int failures = 0;
+                int attempted = 0;
+                foreach (var pair in devices.OrderBy(x => x.Key))
+                {
+                    if (selected != null && !string.Equals(selected, pair.Key, StringComparison.OrdinalIgnoreCase)) continue;
+                    attempted++;
+                    try
+                    {
+                        string label = mapping.ContainsKey(pair.Key) ? mapping[pair.Key] : "MIC_" + pair.Key;
+                        string safeLabel = SafeName(label);
+                        // Keep one microphone per output location even if several share hardware.
+                        bool shared = mapping.Count(m => SafeName(m.Value) == safeLabel) > 1;
+                        string folder = Path.Combine(s.OutputRoot, safeLabel);
+                        if (shared) folder = Path.Combine(folder, "MIC_" + pair.Key);
+                        folder = Path.Combine(folder, start.ToString("yyyy-MM-dd"));
+                        Directory.CreateDirectory(folder);
+                        string filename = start.ToString("HHmm") + "-" + end.ToString("HHmm") + ".wav";
+                        string finalPath = Path.Combine(folder, filename);
+                        if (File.Exists(finalPath) && new FileInfo(finalPath).Length > 44)
+                        { log("SKIP existing " + finalPath); continue; }
+                        if (s.DryRun) { log("DRY RUN " + pair.Key + " -> " + finalPath); continue; }
+                        int tries = Math.Max(1, s.Retries + 1);
+                        bool success = false;
+                        for (int n = 1; n <= tries && !success; n++)
+                        {
+                            try
+                            {
+                                ExportOne(pair.Value, folder, filename, start, end, s, log);
+                                success = true;
+                                log("SUCCESS " + pair.Key + " " + finalPath);
+                            }
+                            catch (Exception ex)
+                            {
+                                log("ATTEMPT " + n + "/" + tries + " FAILED " + pair.Key + ": " + ex.Message);
+                                if (n < tries) Thread.Sleep(TimeSpan.FromSeconds(20 * n));
+                                else throw;
+                            }
+                        }
+                    }
+                    catch (Exception ex) { failures++; log("ERROR " + pair.Key + ": " + ex); }
+                }
+                if (attempted == 0) { log("No matching microphone selected."); return 4; }
+                log("Finished: attempted=" + attempted + " failures=" + failures);
+                return failures == 0 ? 0 : 5;
+            }
+            finally { VideoOS.Platform.SDK.Environment.RemoveAllServers(); }
+        }
+
+        static void Collect(Item item, IDictionary<string,Item> list, ISet<string> visited, int depth)
+        {
+            if (item == null || depth > 15 || item.FQID == null) return;
+            string key = item.FQID.ToString();
+            if (!visited.Add(key)) return;
+            if (item.FQID.Kind == Kind.Microphone && item.FQID.FolderType == FolderType.No)
+                list[item.FQID.ObjectId.ToString("D")] = item;
+            foreach (var child in item.GetChildren() ?? new List<Item>())
+                Collect(child, list, visited, depth + 1);
+        }
+
+        static void ExportOne(Item mic, string folder, string name, DateTime start, DateTime end, Settings s, Action<string> log)
+        {
+            // Request one microphone per WAV; no related camera is necessary.
+            // UTC follows the official standalone AudioExportSample.
+            string tempName = Path.GetFileNameWithoutExtension(name) + ".working-" + Guid.NewGuid().ToString("N") + ".wav";
+            string tempPath = Path.Combine(folder, tempName);
+            WAVExporter exporter = null;
+            try
+            {
+                exporter = new WAVExporter
+                {
+                    FileName = tempName,
+                    Path = folder,
+                    AudioList = new List<Item> { mic },
+                    AudioSampleRate = s.SampleRate <= 0 ? 8000 : s.SampleRate
+                };
+                exporter.Init();
+                var codecs = exporter.CodecList;
+                string codec = string.IsNullOrWhiteSpace(s.Codec) ? codecs.FirstOrDefault() : s.Codec;
+                if (string.IsNullOrWhiteSpace(codec) || !codecs.Contains(codec))
+                    throw new InvalidOperationException("Configured WAV codec is unavailable.");
+                exporter.Codec = codec;
+                if (!exporter.StartExport(start.ToUniversalTime(), end.ToUniversalTime()))
+                    throw new InvalidOperationException("StartExport failed: " + exporter.LastErrorString);
+                DateTime deadline = DateTime.UtcNow.AddMinutes(Math.Max(5, s.ExportTimeoutMinutes));
+                while (exporter.Progress < 100)
+                {
+                    if (exporter.LastError > 0)
+                        throw new InvalidOperationException(exporter.LastErrorString);
+                    if (DateTime.UtcNow > deadline)
+                        throw new TimeoutException("WAV exporter exceeded timeout.");
+                    Thread.Sleep(1000);
+                }
+                exporter.EndExport();
+                if (!File.Exists(tempPath) || new FileInfo(tempPath).Length <= 44)
+                    throw new IOException("WAV output missing or empty: " + tempPath);
+                File.Move(tempPath, Path.Combine(folder, name));
+            }
+            catch
+            {
+                if (exporter != null) { try { exporter.Cancel(); } catch {} }
+                throw;
+            }
+            finally
+            {
+                if (exporter != null)
+                {
+                    try { exporter.EndExport(); } catch {}
+                    try { exporter.Close(); } catch {}
+                }
+                if (File.Exists(tempPath)) { try { File.Delete(tempPath); } catch {} }
+            }
+        }
+
+        static string SafeName(string name)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            string clean = new string((name ?? "").Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim().Trim('.');
+            if (clean.Length > 90) clean = clean.Substring(0, 90);
+            if (string.IsNullOrWhiteSpace(clean) || clean == "..") throw new ArgumentException("Invalid hardware name");
+            return clean;
+        }
+        static string Opt(string[] a, string k)
+        {
+            for(int i=0; i<a.Length-1; i++) if (a[i] == k) return a[i+1];
+            return null;
+        }
+        static string ReadDpapiPassword(string file)
+        {
+            // PowerShell ConvertFrom-SecureString without -Key creates a DPAPI encrypted standard string.
+            // The file is decrypted using the current user's DPAPI key.
+            // PowerShell exposes DPAPI blob as Unicode text encrypted bytes in hexadecimal.
+            var hex = File.ReadAllText(file).Trim();
+            var bytes = Enumerable.Range(0, hex.Length / 2).Select(i => Convert.ToByte(hex.Substring(i*2, 2), 16)).ToArray();
+            var plain = ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser);
+            return Encoding.Unicode.GetString(plain);
+        }
+    }
+}
