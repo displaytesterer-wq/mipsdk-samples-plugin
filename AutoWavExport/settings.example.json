@@ -7,6 +7,5 @@
   "Codec": "",
   "ExportTimeoutMinutes": 240,
   "Retries": 2,
-  "DryRun": true,
-  "HardwareNames": {}
+  "DryRun": true
 }
