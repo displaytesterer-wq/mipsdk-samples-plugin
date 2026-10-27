@@ -266,7 +266,8 @@ namespace AutoWavExport
             // For recordings earlier than the first observation, historical name is UNKNOWN.
             var first = history.Where(x => x.DeviceId == deviceId)
                                .OrderBy(x => x.ObservedAt).FirstOrDefault();
-            return first == null ? "MIC_" + deviceId : "MIC_" + deviceId + "_historical_unknown";
+            if (first != null && end >= first.ObservedAt.AddHours(-2)) return first.Folder;
+            return "MIC_" + deviceId + "_historical_unknown";
         }
 
         static string Csv(string value) => "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
