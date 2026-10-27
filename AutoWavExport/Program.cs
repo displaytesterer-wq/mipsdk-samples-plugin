@@ -89,12 +89,13 @@ namespace AutoWavExport
                 var devices = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
                 foreach (var root in roots) Collect(root, devices, new HashSet<string>(), 0);
                 log("Inventory count: " + devices.Count);
+                WriteInventory(s.OutputRoot, devices);
                 bool inventory = args.Contains("--inventory");
                 string selected = Opt(args, "--device");
-                var mapping = s.HardwareNames ?? new Dictionary<string,string>();
+                
                 foreach (var pair in devices.OrderBy(d => d.Key))
                     log("MIC " + pair.Key + " name=" + pair.Value.Name + " folder=" +
-                        (mapping.ContainsKey(pair.Key) ? mapping[pair.Key] : "MIC_" + pair.Key));
+                        FolderName(pair.Value, pair.Key));
                 if (inventory) return 0;
                 if (devices.Count == 0) { log("ERROR no microphones discovered"); return 3; }
                 int failures = 0;
@@ -105,12 +106,7 @@ namespace AutoWavExport
                     attempted++;
                     try
                     {
-                        string label = mapping.ContainsKey(pair.Key) ? mapping[pair.Key] : "MIC_" + pair.Key;
-                        string safeLabel = SafeName(label);
-                        // Keep one microphone per output location even if several share hardware.
-                        bool shared = mapping.Count(m => SafeName(m.Value) == safeLabel) > 1;
-                        string folder = Path.Combine(s.OutputRoot, safeLabel);
-                        if (shared) folder = Path.Combine(folder, "MIC_" + pair.Key);
+                        string folder = Path.Combine(s.OutputRoot, FolderName(pair.Value, pair.Key));
                         folder = Path.Combine(folder, start.ToString("yyyy-MM-dd"));
                         Directory.CreateDirectory(folder);
                         string filename = start.ToString("HHmm") + "-" + end.ToString("HHmm") + ".wav";
@@ -208,6 +204,20 @@ namespace AutoWavExport
                 }
                 if (File.Exists(tempPath)) { try { File.Delete(tempPath); } catch {} }
             }
+        }
+
+        static void WriteInventory(string root, IDictionary<string, Item> devices)
+        {
+            Func<string,string> csv = value => "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
+            var rows = new List<string> { "DeviceId,MicrophoneName,Folder" };
+            foreach (var pair in devices.OrderBy(x => x.Key))
+                rows.Add(csv(pair.Key) + "," + csv(pair.Value.Name) + "," + csv(FolderName(pair.Value, pair.Key)));
+            File.WriteAllLines(Path.Combine(root, "microphones.csv"), rows, Encoding.UTF8);
+        }
+
+        static string FolderName(Item mic, string id)
+        {
+            return SafeName(mic.Name) + "__" + id;
         }
 
         static string SafeName(string name)
