@@ -1,0 +1,23 @@
+name: AutoWavExport compile
+on:
+  push:
+    branches: [feature/auto-wav-export]
+    paths:
+      - 'AutoWavExport/**'
+      - '.github/workflows/auto-wav-build.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Restore NuGet
+        shell: pwsh
+        run: nuget restore AutoWavExport/AutoWavExport.csproj -NonInteractive
+      - name: Build for .NET Framework 4.7.2 x64
+        shell: pwsh
+        run: msbuild AutoWavExport/AutoWavExport.csproj /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
