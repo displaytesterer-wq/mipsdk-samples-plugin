@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $output = 'AutoWavExport/bin/Release'
+          $output = 'AutoWavExport/bin/x64/Release/net472'
           $exe = Join-Path $output 'AutoWavExport.exe'
           if (!(Test-Path $exe)) { throw "Missing compiled EXE: $exe" }
           New-Item -ItemType Directory -Force -Path 'package/AutoWavExport' | Out-Null
