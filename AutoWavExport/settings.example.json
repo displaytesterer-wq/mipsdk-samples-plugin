@@ -1,0 +1,12 @@
+{
+  "ManagementServer": "https://localhost",
+  "Username": "exporter",
+  "PasswordFile": "C:\\ProgramData\\MilestoneAutoWav\\exporter.secret",
+  "OutputRoot": "D:\\MilestoneExports",
+  "SampleRate": 8000,
+  "Codec": "",
+  "ExportTimeoutMinutes": 240,
+  "Retries": 2,
+  "DryRun": true,
+  "HardwareNames": {}
+}
