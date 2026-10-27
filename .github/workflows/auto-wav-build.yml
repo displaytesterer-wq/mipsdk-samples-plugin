@@ -21,3 +21,21 @@ jobs:
       - name: Build for .NET Framework 4.7.2 x64
         shell: pwsh
         run: msbuild AutoWavExport/AutoWavExport.csproj /t:Build /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+      - name: Assemble release package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = 'AutoWavExport/bin/Release'
+          $exe = Join-Path $output 'AutoWavExport.exe'
+          if (!(Test-Path $exe)) { throw "Missing compiled EXE: $exe" }
+          New-Item -ItemType Directory -Force -Path 'package/AutoWavExport' | Out-Null
+          Copy-Item "$output/*" 'package/AutoWavExport/' -Recurse -Force
+          Copy-Item 'AutoWavExport/settings.example.json','AutoWavExport/Set-Password.ps1','AutoWavExport/Install-Task.ps1','AutoWavExport/README.md','AutoWavExport/TEST-PLAN.md' 'package/AutoWavExport/' -Force
+          Compress-Archive -Path 'package/AutoWavExport' -DestinationPath 'AutoWavExport.zip' -Force
+      - name: Upload AutoWavExport ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoWavExport
+          path: AutoWavExport.zip
+          if-no-files-found: error
+          retention-days: 30
