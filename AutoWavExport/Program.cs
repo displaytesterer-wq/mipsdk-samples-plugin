@@ -26,6 +26,11 @@ namespace AutoWavExport
         public int ExportTimeoutMinutes { get; set; }
         public int Retries { get; set; }
         public bool DryRun { get; set; }
+        public int BackfillDays { get; set; }
+        public int MaxIntervalsPerRun { get; set; }
+        public int MinimumFreeGB { get; set; }
+        public int RetentionDays { get; set; }
+        public bool EnableRetentionDelete { get; set; }
     }
 
     internal static class Program
@@ -74,6 +79,9 @@ namespace AutoWavExport
             if (end.Minute != 0 || end.Second != 0 || end.Hour % 6 != 0 || end > DateTime.Now)
                 throw new ArgumentException("End must be a completed local 6-hour boundary.");
             DateTime start = end.AddHours(-6);
+            if (s.BackfillDays <= 0 || s.BackfillDays > 90 || s.MaxIntervalsPerRun <= 0 || s.MaxIntervalsPerRun > 100)
+                throw new InvalidOperationException("Set BackfillDays 1..90 and MaxIntervalsPerRun 1..100.");
+            if (s.MinimumFreeGB <= 0) throw new InvalidOperationException("MinimumFreeGB must be positive.");
             Uri url = new Uri(s.ManagementServer);
             if (url.Scheme != Uri.UriSchemeHttps) throw new InvalidOperationException("Use verified HTTPS Management Server URL.");
             string password = ReadDpapiPassword(s.PasswordFile);
@@ -100,45 +108,102 @@ namespace AutoWavExport
                 if (devices.Count == 0) { log("ERROR no microphones discovered"); return 3; }
                 int failures = 0;
                 int attempted = 0;
+                var report = new List<string> { "device_id,window_start,window_end,status,detail" };
+                var windows = new List<DateTime>();
+                if (specified != null) windows.Add(end);
+                else for (DateTime w = end.AddDays(-s.BackfillDays).AddHours(6); w <= end; w = w.AddHours(6)) windows.Add(w);
+                int jobsProcessed = 0;
+                int skippedDueLimit = 0;
                 foreach (var pair in devices.OrderBy(x => x.Key))
                 {
                     if (selected != null && !string.Equals(selected, pair.Key, StringComparison.OrdinalIgnoreCase)) continue;
                     attempted++;
-                    try
+                    foreach (var windowEnd in windows)
                     {
-                        string folder = Path.Combine(s.OutputRoot, FolderForWindow(pair.Value, pair.Key, end, history));
-                        folder = Path.Combine(folder, start.ToString("yyyy-MM-dd"));
-                        Directory.CreateDirectory(folder);
-                        string filename = start.ToString("HHmm") + "-" + end.ToString("HHmm") + ".wav";
-                        string finalPath = Path.Combine(folder, filename);
-                        if (File.Exists(finalPath) && new FileInfo(finalPath).Length > 44)
-                        { log("SKIP existing " + finalPath); continue; }
-                        if (s.DryRun) { log("DRY RUN " + pair.Key + " -> " + finalPath); continue; }
-                        int tries = Math.Max(1, s.Retries + 1);
-                        bool success = false;
-                        for (int n = 1; n <= tries && !success; n++)
+                        DateTime windowStart = windowEnd.AddHours(-6);
+                        string status = "ERROR", detail = "";
+                        try
                         {
-                            try
+                            string folder = Path.Combine(s.OutputRoot, FolderForWindow(pair.Value, pair.Key, windowEnd, history));
+                            folder = Path.Combine(folder, windowStart.ToString("yyyy-MM-dd"));
+                            string filename = windowStart.ToString("HHmm") + "-" + windowEnd.ToString("HHmm") + ".wav";
+                            string finalPath = Path.Combine(folder, filename);
+                            if (File.Exists(finalPath) && WavCheck.Validate(finalPath, out detail))
+                            { status = "EXISTS_VALID"; continue; }
+                            if (File.Exists(finalPath)) throw new IOException("Existing WAV invalid, manual quarantine required: " + detail);
+                            if (jobsProcessed >= s.MaxIntervalsPerRun) { status = "DEFERRED"; skippedDueLimit++; continue; }
+                            if (s.DryRun) { status = "DRY_RUN"; log("DRY RUN " + finalPath); continue; }
+                            GuardDisk(s.OutputRoot, s.MinimumFreeGB);
+                            Directory.CreateDirectory(folder);
+                            jobsProcessed++;
+                            int tries = Math.Max(1, s.Retries + 1);
+                            for (int n = 1; n <= tries; n++)
                             {
-                                ExportOne(pair.Value, folder, filename, start, end, s, log);
-                                success = true;
-                                log("SUCCESS " + pair.Key + " " + finalPath);
-                            }
-                            catch (Exception ex)
-                            {
-                                log("ATTEMPT " + n + "/" + tries + " FAILED " + pair.Key + ": " + ex.Message);
-                                if (n < tries) Thread.Sleep(TimeSpan.FromSeconds(20 * n));
-                                else throw;
+                                try
+                                {
+                                    ExportOne(pair.Value, folder, filename, windowStart, windowEnd, s, log);
+                                    status = "SUCCESS"; detail = "WAV structure valid";
+                                    log("SUCCESS " + pair.Key + " " + finalPath);
+                                    break;
+                                }
+                                catch (Exception ex)
+                                {
+                                    detail = ex.Message;
+                                    log("ATTEMPT " + n + "/" + tries + " FAILED " + pair.Key + " " + windowEnd.ToString("o") + ": " + detail);
+                                    if (n == tries) throw;
+                                    Thread.Sleep(TimeSpan.FromSeconds(20 * n));
+                                }
                             }
                         }
+                        catch (Exception ex) { failures++; detail = ex.Message; log("ERROR " + pair.Key + ": " + ex); }
+                        finally
+                        {
+                            report.Add(Csv(pair.Key) + "," + Csv(windowStart.ToString("o")) + "," +
+                                       Csv(windowEnd.ToString("o")) + "," + Csv(status) + "," + Csv(detail));
+                        }
                     }
-                    catch (Exception ex) { failures++; log("ERROR " + pair.Key + ": " + ex); }
                 }
                 if (attempted == 0) { log("No matching microphone selected."); return 4; }
-                log("Finished: attempted=" + attempted + " failures=" + failures);
-                return failures == 0 ? 0 : 5;
+                string reportPath = Path.Combine(logDirectory, "export-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
+                File.WriteAllLines(reportPath, report, Encoding.UTF8);
+                log("Report=" + reportPath + " failures=" + failures + " deferred=" + skippedDueLimit);
+                if (!s.DryRun && s.EnableRetentionDelete) RetentionCleanup(s.OutputRoot, s.RetentionDays, log);
+                // Nonzero exit status is picked up by Task Scheduler and external monitoring.
+                return failures == 0 && skippedDueLimit == 0 ? 0 : 5;
             }
             finally { VideoOS.Platform.SDK.Environment.RemoveAllServers(); }
+        }
+
+        static void GuardDisk(string folder, int requiredGb)
+        {
+            string root = Path.GetPathRoot(Path.GetFullPath(folder));
+            long free = new DriveInfo(root).AvailableFreeSpace;
+            if (free < (long)requiredGb * 1024 * 1024 * 1024)
+                throw new IOException("Low export disk free space: " + free + " bytes");
+        }
+
+        static void RetentionCleanup(string root, int days, Action<string> log)
+        {
+            if (days < 1) throw new InvalidOperationException("RetentionDays must be positive.");
+            string rootFull = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            DateTime cutoff = DateTime.Today.AddDays(-days);
+            foreach (var micFolder in Directory.GetDirectories(root))
+            {
+                string dir = Path.GetFileName(micFolder);
+                if (dir.StartsWith("_", StringComparison.Ordinal)) continue;
+                foreach (var dayFolder in Directory.GetDirectories(micFolder))
+                {
+                    DateTime date;
+                    if (!DateTime.TryParseExact(Path.GetFileName(dayFolder), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out date) || date >= cutoff) continue;
+                    foreach (var file in Directory.GetFiles(dayFolder, "*.wav"))
+                    {
+                        if (!Path.GetFullPath(file).StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                            throw new IOException("Retention target outside root.");
+                        File.Delete(file);
+                        log("RETENTION_DELETE " + file);
+                    }
+                }
+            }
         }
 
         static void Collect(Item item, IDictionary<string,Item> list, ISet<string> visited, int depth)
@@ -186,8 +251,9 @@ namespace AutoWavExport
                     Thread.Sleep(1000);
                 }
                 exporter.EndExport();
-                if (!File.Exists(tempPath) || new FileInfo(tempPath).Length <= 44)
-                    throw new IOException("WAV output missing or empty: " + tempPath);
+                string reason;
+                if (!WavCheck.Validate(tempPath, out reason))
+                    throw new IOException("WAV structure check failed: " + reason);
                 File.Move(tempPath, Path.Combine(folder, name));
             }
             catch
