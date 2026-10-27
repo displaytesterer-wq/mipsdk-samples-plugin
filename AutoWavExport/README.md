@@ -40,3 +40,14 @@ No Hardware/camera relationship or manual mapping is required. The current SDK m
 - Verify the actual archive completion delay, recording retention, disk capacity, access-control lists and unattended Windows task identity.
 - Add a durable missed-interval recovery queue and monitoring/alerting before production: a 4-hour blocked export can cause later windows to be skipped.
 - User has not supplied Management Server endpoint, local export disk size or microphone count.
+
+## Reliability controls (unverified in production)
+- **Backfill**: on each run inspect the last BackfillDays of six-hour windows for each microphone. Valid files are skipped; missing windows are exported sequentially, up to MaxIntervalsPerRun per invocation. DryRun does not mark a window as complete. The window history is bounded: outages longer than BackfillDays require explicit --end/manual recovery.
+- **Integrity**: checks RIFF/WAVE, declared size, fmt and nonempty data chunks. It does **not** prove six hours of continuous audio; see TEST-PLAN.md. Invalid existing files are not overwritten and must be manually quarantined.
+- **Disk**: MinimumFreeGB threshold before each new export; Task Scheduler exit code and per-run CSV report show failures.
+- **Alerting**: CSV export-report-*.csv and _logs plus nonzero exit status; external email/notification integration **not yet configured**.
+- **Retention**: RetentionDays applies only to exported dated WAV subfolders and only when EnableRetentionDelete=true; OFF by default. Never point OutputRoot at a Milestone database.
+- **Release gate**: [TEST-PLAN.md](TEST-PLAN.md) documents build/runtime/manual tests. NONE are marked completed.
+
+## Example settings
+BackfillDays=7; MaxIntervalsPerRun=40; MinimumFreeGB=20; RetentionDays=90; EnableRetentionDelete=false. Select retention after confirming applicable policy.
