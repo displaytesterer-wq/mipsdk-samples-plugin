@@ -26,7 +26,6 @@ namespace AutoWavExport
         public int ExportTimeoutMinutes { get; set; }
         public int Retries { get; set; }
         public bool DryRun { get; set; }
-        public Dictionary<string, string> HardwareNames { get; set; }
     }
 
     internal static class Program
@@ -90,6 +89,7 @@ namespace AutoWavExport
                 foreach (var root in roots) Collect(root, devices, new HashSet<string>(), 0);
                 log("Inventory count: " + devices.Count);
                 WriteInventory(s.OutputRoot, devices);
+                var history = UpdateNameHistory(s.OutputRoot, devices, DateTime.Now, log);
                 bool inventory = args.Contains("--inventory");
                 string selected = Opt(args, "--device");
                 
@@ -106,7 +106,7 @@ namespace AutoWavExport
                     attempted++;
                     try
                     {
-                        string folder = Path.Combine(s.OutputRoot, FolderName(pair.Value, pair.Key));
+                        string folder = Path.Combine(s.OutputRoot, FolderForWindow(pair.Value, pair.Key, end, history));
                         folder = Path.Combine(folder, start.ToString("yyyy-MM-dd"));
                         Directory.CreateDirectory(folder);
                         string filename = start.ToString("HHmm") + "-" + end.ToString("HHmm") + ".wav";
@@ -204,6 +204,92 @@ namespace AutoWavExport
                 }
                 if (File.Exists(tempPath)) { try { File.Delete(tempPath); } catch {} }
             }
+        }
+
+        // Append-only observation history. A timestamp is when the exporter detected a
+        // name, NOT necessarily when a Milestone administrator actually renamed it.
+        sealed class NameObservation
+        {
+            public string DeviceId { get; set; }
+            public DateTime ObservedAt { get; set; }
+            public string MicrophoneName { get; set; }
+            public string Folder { get; set; }
+        }
+
+        static List<NameObservation> UpdateNameHistory(
+            string root, IDictionary<string, Item> devices, DateTime now, Action<string> log)
+        {
+            string path = Path.Combine(root, "device_history.csv");
+            var history = new List<NameObservation>();
+            if (File.Exists(path))
+            {
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8).Skip(1))
+                {
+                    try
+                    {
+                        var cells = ParseCsv(line);
+                        if (cells.Count != 4) continue;
+                        history.Add(new NameObservation {
+                            ObservedAt = DateTime.ParseExact(cells[0], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                            DeviceId = cells[1], MicrophoneName = cells[2], Folder = cells[3]
+                        });
+                    }
+                    catch (Exception ex) { throw new InvalidDataException("Invalid device_history.csv; preserve and repair manually.", ex); }
+                }
+            }
+            if (!File.Exists(path))
+                File.WriteAllText(path, "ObservedAt,DeviceId,MicrophoneName,Folder" + Environment.NewLine, Encoding.UTF8);
+
+            foreach (var pair in devices.OrderBy(x => x.Key))
+            {
+                string folder = FolderName(pair.Value, pair.Key);
+                var last = history.Where(x => x.DeviceId == pair.Key).OrderByDescending(x => x.ObservedAt).FirstOrDefault();
+                if (last != null && last.MicrophoneName == pair.Value.Name && last.Folder == folder) continue;
+                var entry = new NameObservation { ObservedAt = now, DeviceId = pair.Key,
+                    MicrophoneName = pair.Value.Name, Folder = folder };
+                string row = Csv(now.ToString("o")) + "," + Csv(pair.Key) + "," +
+                             Csv(pair.Value.Name) + "," + Csv(folder) + Environment.NewLine;
+                File.AppendAllText(path, row, Encoding.UTF8);
+                history.Add(entry);
+                log((last == null ? "NEW MIC " : "NAME CHANGE OBSERVED ") + pair.Key + ": " + folder);
+            }
+            return history;
+        }
+
+        static string FolderForWindow(Item mic, string deviceId, DateTime end, List<NameObservation> history)
+        {
+            // Use the name last observed BEFORE the recording interval ended.
+            // A name first observed after this period cannot safely label past audio.
+            var match = history.Where(x => x.DeviceId == deviceId && x.ObservedAt <= end)
+                               .OrderByDescending(x => x.ObservedAt).FirstOrDefault();
+            if (match != null) return match.Folder;
+            // For recordings earlier than the first observation, historical name is UNKNOWN.
+            var first = history.Where(x => x.DeviceId == deviceId)
+                               .OrderBy(x => x.ObservedAt).FirstOrDefault();
+            return first == null ? "MIC_" + deviceId : "MIC_" + deviceId + "_historical_unknown";
+        }
+
+        static string Csv(string value) => "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
+
+        static List<string> ParseCsv(string input)
+        {
+            var fields = new List<string>();
+            var part = new StringBuilder();
+            bool quoted = false;
+            for(int i=0; i<input.Length; i++)
+            {
+                char ch = input[i];
+                if(ch == '"')
+                {
+                    if(quoted && i+1<input.Length && input[i+1]=='"') { part.Append('"'); i++; }
+                    else quoted = !quoted;
+                }
+                else if(ch==',' && !quoted) { fields.Add(part.ToString()); part.Clear(); }
+                else part.Append(ch);
+            }
+            if(quoted) throw new FormatException("Unclosed CSV field");
+            fields.Add(part.ToString());
+            return fields;
         }
 
         static void WriteInventory(string root, IDictionary<string, Item> devices)
