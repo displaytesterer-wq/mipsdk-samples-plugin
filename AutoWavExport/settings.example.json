@@ -7,5 +7,10 @@
   "Codec": "",
   "ExportTimeoutMinutes": 240,
   "Retries": 2,
-  "DryRun": true
+  "DryRun": true,
+  "BackfillDays": 7,
+  "MaxIntervalsPerRun": 40,
+  "MinimumFreeGB": 20,
+  "RetentionDays": 90,
+  "EnableRetentionDelete": false
 }
