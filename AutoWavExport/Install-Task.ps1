@@ -11,7 +11,8 @@ $triggers = @('00:30','06:30','12:30','18:30') | ForEach-Object { New-ScheduledT
 # ExecutionTimeLimit (5 цаг) нь settings.json-ийн MaxRunMinutes-ээс их байх ёстой (дээд 285, анхдагч 270).
 # PowerShell-д хувьсагчийн нэр том жижиг үсэг ялгадаггүй: $settings нь [string]$Settings параметртэй давхцаж
 # string болж хувирдаг байсан. Тиймээс $taskSettings гэж нэрлэв.
-$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 5) -StartWhenAvailable
+# Батарейтай (UPS/laptop) серверт task чимээгүй эхлэхгүй байхаас сэргийлж батарейн нөхцөлийг унтраав.
+$taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 5) -StartWhenAvailable
 # Энэ скриптийг XProtect role-д нэмсэн тусгай Windows account-аар ажиллуулна (Basic горимд DPAPI файлыг үүсгэсэн account).
 # Доорх бүртгэл тэр хэрэглэгчийн нэвтрэх мэдээллийг ашиглана; GitHub-д хадгалагдахгүй.
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $taskSettings -Description 'XProtect scheduled microphone WAV export' -Force | Out-Null
