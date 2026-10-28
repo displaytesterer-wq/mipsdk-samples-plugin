@@ -5,7 +5,8 @@ Stand-alone, no Smart Client dependency. Based on the Milestone component AudioE
 **Status: implementation prepared, not compiled against local XProtect 2025 R3 SDK and not tested on the user's server.** Do NOT enable the task until a one-microphone test passes.
 
 ## Behavior
-- Login as XProtect Basic user `exporter` with local DPAPI-encrypted password.
+- Default `AuthMode: "Windows"`: logs in as the Windows account that runs the task (Kerberos/NTLM). Works with `http://` when the Management Server has no encryption certificate; no password file needed. Add that Windows account to an XProtect role that can play back and export the microphones.
+- Optional `AuthMode: "Basic"`: XProtect Basic user `exporter` with local DPAPI-encrypted password (`Set-Password.ps1`). Requires an `https://` Management Server URL.
 - Enumerates microphone Items from the **physical/system-defined** SDK tree, without requiring a related camera.
 - Exports microphones individually to WAV. A missed job can be rerun manually with `--end 2026-10-27T06:00:00`; the end time is the **local** six-hour boundary, not the start.
 - Every invocation uses the last completed 6-hour boundary. Recommended Task Scheduler triggers: **00:30, 06:30, 12:30, 18:30** local Windows time, because archive starts at 00/06/12/18. The 30-minute margin is not proof archiving completed.
@@ -19,7 +20,7 @@ No Hardware/camera relationship or manual mapping is required. The current SDK m
 ## Build/install
 1. Install compatible MIP SDK and Visual Studio/.NET Framework 4.7.2 targeting pack on a development workstation. Restore/build `AutoWavExport.csproj` targeting x64. Ensure MIP SDK exporter native dependencies are available on the server.
 2. Publish/copy executable and required SDK assemblies to `C:\MilestoneAutoWav`. Copy `settings.example.json` as `settings.json` and replace management URL, storage location; **do not commit settings.json**.
-3. On the Windows server, in Windows PowerShell 5.1 as the Windows account running the task, run `Set-Password.ps1`. Do not paste password into chat, GitHub or script. Keep the same task-running account to decrypt DPAPI.
+3. Windows mode: in Management Client add the task's Windows account (e.g. `DOMAIN\svc-wavexport`) to a role with playback/export rights on the microphones. Basic mode only: as the task-running Windows account, run `Set-Password.ps1`. Never paste a password into chat, GitHub or a script.
 4. Run `AutoWavExport.exe --config C:\MilestoneAutoWav\settings.json --inventory` to list allowed microphones' GUIDs. Review the generated `microphones.csv`. If zero microphones are shown, verify role and hierarchy.
 5. Keep `DryRun: true` initially and test `--end 2026-10-27T06:00:00`. Then change DryRun to false, perform a single microphone pilot (`--device <guid>`), verify playable WAV, duration, dates and permissions.
 6. Run `Install-Task.ps1` from elevated PowerShell **under the same Windows account** and configure Task Scheduler `Run whether user is logged on or not`; this may require entering that Windows account password. Confirm Task history and permissions.
@@ -36,7 +37,7 @@ No Hardware/camera relationship or manual mapping is required. The current SDK m
 
 ## Outstanding pre-production verification
 - Compile against the exact 2025 R3 MIP SDK (package pinned to 25.3.2); validate BuildCredentialCache, microphone discovery and exporter APIs.
-- Validate actual Basic login URL/certificate and exported WAV output naming/duration with one unrelated microphone.
+- Validate actual login (Windows or Basic) and URL and exported WAV output naming/duration with one unrelated microphone.
 - Test first scheduled run, archive boundary, rename, historical retry, DST/timezone, duplicate name/path and incomplete output handling.
 - Verify the actual archive completion delay, recording retention, disk capacity, access-control lists and unattended Windows task identity.
 - Add a durable missed-interval recovery queue and monitoring/alerting before production: a 4-hour blocked export can cause later windows to be skipped.

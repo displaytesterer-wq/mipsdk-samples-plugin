@@ -18,6 +18,10 @@ namespace AutoWavExport
     public sealed class Settings
     {
         public string ManagementServer { get; set; }
+        // "Windows" (анхдагч): task ажиллуулж буй Windows account-аар нэвтэрнэ. http:// болон https:// хоёулаа болно,
+        //   нууц үгийн файл шаардлагагүй.
+        // "Basic": XProtect Basic user (Username + PasswordFile). Нууц үг илгээгддэг тул зөвхөн https://.
+        public string AuthMode { get; set; }
         public string Username { get; set; }
         public string PasswordFile { get; set; }
         public string OutputRoot { get; set; }
@@ -92,8 +96,13 @@ namespace AutoWavExport
             string config = Opt(args, "--config") ?? "settings.json";
             var s = Json.Deserialize<Settings>(File.ReadAllText(config, Encoding.UTF8));
             if (s == null || string.IsNullOrWhiteSpace(s.ManagementServer) ||
-                string.IsNullOrWhiteSpace(s.OutputRoot) || string.IsNullOrWhiteSpace(s.PasswordFile))
+                string.IsNullOrWhiteSpace(s.OutputRoot))
                 throw new InvalidOperationException("Incomplete settings.json");
+            bool basicAuth = string.Equals(s.AuthMode, "Basic", StringComparison.OrdinalIgnoreCase);
+            if (!basicAuth && !string.IsNullOrWhiteSpace(s.AuthMode) && !string.Equals(s.AuthMode, "Windows", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("AuthMode must be \"Windows\" or \"Basic\".");
+            if (basicAuth && string.IsNullOrWhiteSpace(s.PasswordFile))
+                throw new InvalidOperationException("AuthMode Basic requires PasswordFile.");
             ApplyDefaultsAndValidate(s);
 
             Directory.CreateDirectory(s.OutputRoot);
@@ -117,19 +126,38 @@ namespace AutoWavExport
             if (end.Minute != 0 || end.Second != 0 || end.Hour % 6 != 0 || end > now)
                 throw new ArgumentException("End must be a completed local 6-hour boundary.");
             Uri url = new Uri(s.ManagementServer);
-            if (url.Scheme != Uri.UriSchemeHttps) throw new InvalidOperationException("Use verified HTTPS Management Server URL.");
+            bool https = url.Scheme == Uri.UriSchemeHttps;
+            if (!https && url.Scheme != Uri.UriSchemeHttp)
+                throw new InvalidOperationException("ManagementServer must start with http:// or https://");
+            // Basic user-ийн нууц үгийг шифрлэлтгүй холболтоор илгээхгүй.
+            if (basicAuth && !https)
+                throw new InvalidOperationException("AuthMode Basic requires an https:// Management Server URL. Use AuthMode Windows for http://.");
 
             // Глобал түгжээ манайд байгаа тул *.working-* файл бүр таслагдсан ажлаас үлдсэн хог.
             CleanupStaleWorkingFiles(s.OutputRoot, s.DryRun, log);
 
             DateTime runDeadlineUtc = runStartedUtc.AddMinutes(s.MaxRunMinutes);
-            string password = ReadDpapiPassword(s.PasswordFile);
+            CredentialCache cc;
+            if (basicAuth)
+            {
+                string password = ReadDpapiPassword(s.PasswordFile);
+                cc = VideoOS.Platform.Login.Util.BuildCredentialCache(url, s.Username ?? "exporter", password, "Basic");
+            }
+            else
+            {
+                // Task ажиллуулж буй Windows account-ын мэдээллээр Kerberos/NTLM-ээр нэвтэрнэ.
+                // Нууц үг програмд дамжихгүй, Windows өөрөө баталгаажуулна.
+                cc = new CredentialCache();
+                cc.Add(url, "Negotiate", CredentialCache.DefaultNetworkCredentials);
+            }
             VideoOS.Platform.SDK.Environment.Initialize();
             VideoOS.Platform.SDK.Export.Environment.Initialize();
             try
             {
-                var cc = VideoOS.Platform.Login.Util.BuildCredentialCache(url, s.Username ?? "exporter", password, "Basic");
-                VideoOS.Platform.SDK.Environment.AddServer(true, url, cc, true);
+                log("Login " + url + " as " + (basicAuth ? "Basic user " + (s.Username ?? "exporter")
+                                                          : "Windows user " + Environment.UserDomainName + "\\" + Environment.UserName));
+                // Эхний параметр secureOnly: http:// хаягтай үед false байх ёстой.
+                VideoOS.Platform.SDK.Environment.AddServer(https, url, cc, true);
                 VideoOS.Platform.SDK.Environment.Login(url, IntegrationId, "Auto WAV Export", "0.2.0", "Internal", true);
                 var roots = Configuration.Instance.GetItemsByKind(Kind.Microphone, ItemHierarchy.SystemDefined);
                 var devices = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);

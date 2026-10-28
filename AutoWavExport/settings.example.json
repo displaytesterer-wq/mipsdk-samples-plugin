@@ -1,5 +1,6 @@
 {
-  "ManagementServer": "https://localhost",
+  "ManagementServer": "http://vms01",
+  "AuthMode": "Windows",
   "Username": "exporter",
   "PasswordFile": "C:\\ProgramData\\MilestoneAutoWav\\exporter.secret",
   "OutputRoot": "D:\\MilestoneExports",

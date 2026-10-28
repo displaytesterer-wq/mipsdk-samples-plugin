@@ -10,7 +10,7 @@
 - Check config values: BackfillDays 1-90, MaxIntervalsPerRun 1-100, MinimumFreeGB positive; Retention deletion disabled by default.
 
 ## On-server checks (to be run by operator)
-1. HTTPS Management Server certificate and Basic account `exporter` authentication works. No credentials are committed.
+1. Windows mode: the task's Windows account logs in over `http://` (log shows `Login ... as Windows user`). Basic mode: HTTPS certificate and `exporter` login work. No credentials are committed.
 2. Inventory shows all microphones in SDK, including one with no related camera.
 3. Start with DryRun true; run `--inventory` and a historical `--end` preview.
 4. Enable real export for one microphone `--device <GUID>`. Validate actual playable audio, channels, duration and expected gaps. RIFF structural validation alone is insufficient.
@@ -21,7 +21,7 @@
 9. Force disk-low error; verify nonzero exit code and CSV report.
 10. Check no WAV is overwritten, corrupted files halt instead of being replaced, and retry behavior.
 11. With EnableRetentionDelete false confirm no deletion; with test-only sandbox paths and 2-day retention test only old YYYY-MM-DD subfolder WAV deletion. Do NOT enable on production before backup and legal retention policy approval.
-12. Verify Task Scheduler runs unattended and captures exit code, file ACLs and DPAPI identity.
+12. Verify Task Scheduler runs unattended with the password stored (NOT "Do not store password", which removes network access and breaks Windows login), and captures exit code and file ACLs.
 13. Confirm the produced file name: check whether WAVExporter appends `.wav` to `FileName` (the exporter now locates either form; log shows the result).
 14. While the scheduled task is running, start a manual run from an RDP session: it must exit with code 2 (global lock).
 15. Set MaxRunMinutes=30 and ExportTimeoutMinutes=10 on a test box: verify DEFERRED rows, report CSV complete, and no `*.working-*` files left after the next run.

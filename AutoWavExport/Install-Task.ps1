@@ -10,7 +10,7 @@ $action = New-ScheduledTaskAction -Execute $Exe -Argument ('--config "' + $Setti
 $triggers = @('00:30','06:30','12:30','18:30') | ForEach-Object { New-ScheduledTaskTrigger -Daily -At $_ }
 # ExecutionTimeLimit (5 цаг) нь settings.json-ийн MaxRunMinutes-ээс их байх ёстой (дээд 285, анхдагч 270).
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 5) -StartWhenAvailable
-# Энэ скриптийг DPAPI нууц файлыг үүсгэсэн тусгай Windows account-аар ажиллуулна.
+# Энэ скриптийг XProtect role-д нэмсэн тусгай Windows account-аар ажиллуулна (Basic горимд DPAPI файлыг үүсгэсэн account).
 # Доорх бүртгэл тэр хэрэглэгчийн нэвтрэх мэдээллийг ашиглана; GitHub-д хадгалагдахгүй.
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $settings -Description 'XProtect scheduled microphone WAV export' -Force | Out-Null
-Write-Host 'Task created. Configure Task Scheduler > General > Run whether user is logged on or not under the SAME account as exporter.secret.'
+Write-Host 'Task created. In Task Scheduler > General choose "Run whether user is logged on or not" for the XProtect Windows account, and leave "Do not store password" UNCHECKED (network login needs it).'
