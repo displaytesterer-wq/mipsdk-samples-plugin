@@ -31,15 +31,15 @@ namespace AutoWavExport
         public int MinimumFreeGB { get; set; }
         public int RetentionDays { get; set; }
         public bool EnableRetentionDelete { get; set; }
-        // Total wall-clock budget for one invocation. Must stay below the Task Scheduler
-        // ExecutionTimeLimit (5 h in Install-Task.ps1) so the run finishes cleanly instead of being killed.
+        // Нэг удаагийн ажлын нийт хугацааны хязгаар (минут). Task Scheduler-ийн
+        // ExecutionTimeLimit-ээс (Install-Task.ps1-д 5 цаг) бага байх ёстой, тэгэхгүй бол процесс хүчээр зогсоогдоно.
         public int MaxRunMinutes { get; set; }
-        // After this many failed runs for the same microphone/window, stop retrying it automatically
-        // (typically: no recorded audio in that window). Manual --end ignores this limit.
+        // Нэг микрофоны нэг цонх энэ тооны удаа бүтэлгүйтвэл автоматаар дахин оролдохоо болино
+        // (ихэвчлэн тухайн хугацаанд бичлэг байхгүй үед). Гараар --end өгвөл энэ хязгаарыг үл тооно.
         public int MaxWindowAttempts { get; set; }
     }
 
-    // Not the window's fault: must not count toward MaxWindowAttempts.
+    // Цонхны буруу биш алдаанууд: MaxWindowAttempts-д тоологдохгүй.
     sealed class LowDiskException : IOException { public LowDiskException(string m) : base(m) { } }
     sealed class RunBudgetExceededException : TimeoutException { public RunBudgetExceededException(string m) : base(m) { } }
 
@@ -48,10 +48,10 @@ namespace AutoWavExport
         static readonly Guid IntegrationId = new Guid("86F42E94-41B8-4F47-9E56-6A815A0C482F");
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
-        // Global\ so that a scheduled run (session 0) and a manual run (RDP/console session)
-        // see the same lock and never export at the same time.
+        // Global\ ашигласнаар хуваарьт ажил (session 0) болон гараар ажиллуулсан (RDP/console session)
+        // ажил нэг түгжээг хуваалцаж, хэзээ ч зэрэг export хийхгүй.
         const string MutexName = @"Global\MilestoneAutoWavExport";
-        // Task Scheduler ExecutionTimeLimit configured by Install-Task.ps1.
+        // Install-Task.ps1-д тохируулсан Task Scheduler-ийн ExecutionTimeLimit (минут).
         const int TaskSchedulerLimitMinutes = 300;
         const string WorkingMarker = ".working-";
 
@@ -64,14 +64,14 @@ namespace AutoWavExport
                 try { mutex = new Mutex(false, MutexName); }
                 catch (UnauthorizedAccessException)
                 {
-                    // Lock exists and is owned by a different Windows account that is currently running.
+                    // Түгжээ байгаа бөгөөд өөр Windows account одоо ажиллаж байна.
                     Console.Error.WriteLine("Another export is active (lock held by another account).");
                     return 2;
                 }
                 try { locked = mutex.WaitOne(TimeSpan.FromSeconds(1)); }
                 catch (AbandonedMutexException)
                 {
-                    // Previous process was killed while holding the lock; we now own it.
+                    // Өмнөх процесс түгжээтэй байхдаа таслагдсан; одоо түгжээ манайх.
                     locked = true;
                     Console.Error.WriteLine("Previous run ended abnormally; lock recovered.");
                 }
@@ -119,7 +119,7 @@ namespace AutoWavExport
             Uri url = new Uri(s.ManagementServer);
             if (url.Scheme != Uri.UriSchemeHttps) throw new InvalidOperationException("Use verified HTTPS Management Server URL.");
 
-            // We hold the global lock, so any *.working-* file is a leftover from a killed run.
+            // Глобал түгжээ манайд байгаа тул *.working-* файл бүр таслагдсан ажлаас үлдсэн хог.
             CleanupStaleWorkingFiles(s.OutputRoot, s.DryRun, log);
 
             DateTime runDeadlineUtc = runStartedUtc.AddMinutes(s.MaxRunMinutes);
@@ -152,8 +152,8 @@ namespace AutoWavExport
                     .ToList();
                 if (targets.Count == 0) { log("No matching microphone selected."); return 4; }
 
-                // Newest window first, and every microphone gets that window before any older backfill.
-                // Prevents later microphones from being starved by the first ones' backlog.
+                // Хамгийн шинэ цонхыг эхэлж, бүх микрофонд хийсний дараа хуучин цонх руу шилжинэ.
+                // Ингэснээр эхний микрофонуудын хуримтлал сүүлийнхийг хойшлуулахгүй.
                 var windows = new List<DateTime>();
                 if (specified != null) windows.Add(end);
                 else for (DateTime w = end; w > end.AddDays(-s.BackfillDays); w = w.AddHours(-6)) windows.Add(w);
@@ -161,7 +161,7 @@ namespace AutoWavExport
                 var attempts = AttemptStore.Load(Path.Combine(stateDirectory, "window_attempts.csv"));
                 attempts.Prune(end.AddDays(-s.BackfillDays - 1));
 
-                // Report is appended row by row so it survives even if the process is terminated.
+                // Тайланг мөр бүрээр нэмж бичдэг тул процесс таслагдсан ч хадгалагдана.
                 string reportPath = Path.Combine(logDirectory, "export-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
                 File.WriteAllText(reportPath, "device_id,window_start,window_end,status,detail" + Environment.NewLine, Encoding.UTF8);
                 log("Report=" + reportPath);
@@ -193,7 +193,7 @@ namespace AutoWavExport
                                 continue;
                             }
                             if (jobsProcessed >= s.MaxIntervalsPerRun) { status = "DEFERRED"; detail = "MaxIntervalsPerRun reached"; deferred++; continue; }
-                            // Need room for at least one full attempt plus shutdown.
+                            // Дор хаяж нэг оролдлого болон хаалтад хугацаа үлдсэн байх ёстой.
                             if (DateTime.UtcNow.AddMinutes(5) >= runDeadlineUtc) { status = "DEFERRED"; detail = "MaxRunMinutes budget reached"; deferred++; continue; }
                             if (s.DryRun) { status = "DRY_RUN"; log("DRY RUN " + finalPath); continue; }
                             GuardDisk(s.OutputRoot, s.MinimumFreeGB);
@@ -224,7 +224,7 @@ namespace AutoWavExport
                         }
                         catch (RunBudgetExceededException ex)
                         {
-                            // Stopped to stay inside the Task Scheduler limit; retried next run, not counted.
+                            // Task Scheduler-ийн хязгаарт багтаахаар зогсоосон; дараагийн удаа дахин хийнэ, тоологдохгүй.
                             status = "DEFERRED"; detail = ex.Message; deferred++;
                             log("DEFERRED " + pair.Key + " " + windowEnd.ToString("o") + ": " + ex.Message);
                         }
@@ -247,8 +247,8 @@ namespace AutoWavExport
                 if (!s.DryRun) attempts.Save();
                 log("Done failures=" + failures + " deferred=" + deferred + " gave_up=" + gaveUp);
                 if (!s.DryRun && s.EnableRetentionDelete) RetentionCleanup(s.OutputRoot, s.RetentionDays, log);
-                // Nonzero exit status is picked up by Task Scheduler and external monitoring.
-                // GAVE_UP windows were already reported as failures in the runs that gave up on them.
+                // 0-ээс ялгаатай exit code-ийг Task Scheduler болон гадны хяналт хүлээн авна.
+                // GAVE_UP цонхууд орхигдсон тэр удаадаа алдаа гэж бүртгэгдсэн.
                 return failures == 0 && deferred == 0 ? 0 : 5;
             }
             finally { VideoOS.Platform.SDK.Environment.RemoveAllServers(); }
@@ -256,7 +256,7 @@ namespace AutoWavExport
 
         static void ApplyDefaultsAndValidate(Settings s)
         {
-            // JavaScriptSerializer leaves missing numbers at 0; treat 0 as "use default".
+            // JavaScriptSerializer байхгүй тоог 0 болгодог; 0-ийг "анхдагч утга" гэж үзнэ.
             if (s.ExportTimeoutMinutes <= 0) s.ExportTimeoutMinutes = 60;
             if (s.MaxRunMinutes <= 0) s.MaxRunMinutes = 270;
             if (s.MaxWindowAttempts <= 0) s.MaxWindowAttempts = 3;
@@ -333,10 +333,10 @@ namespace AutoWavExport
         static void ExportOne(Item mic, string folder, string name, DateTime start, DateTime end, Settings s,
                               DateTime attemptDeadlineUtc, DateTime runDeadlineUtc)
         {
-            // Request one microphone per WAV; no related camera is necessary.
-            // UTC follows the official standalone AudioExportSample.
-            // FileName is given WITHOUT extension; the produced file is located afterwards, so it works
-            // whether or not the SDK appends ".wav" itself.
+            // WAV файл бүрт нэг микрофон; холбоотой камер шаардлагагүй.
+            // Албан ёсны AudioExportSample-ийн адил UTC цаг ашиглана.
+            // FileName-ийг өргөтгөлгүй өгч, үүссэн файлыг дараа нь хайж олно. Ингэснээр SDK
+            // ".wav"-ийг өөрөө нэмдэг эсэхээс үл хамааран ажиллана.
             string tempBase = Path.GetFileNameWithoutExtension(name) + WorkingMarker + Guid.NewGuid().ToString("N");
             WAVExporter exporter = null;
             bool ended = false;
@@ -390,7 +390,7 @@ namespace AutoWavExport
                     if (!ended) { try { exporter.EndExport(); } catch {} }
                     try { exporter.Close(); } catch {}
                 }
-                // Remove anything the exporter left with our temp name (file or folder).
+                // Exporter-ийн түр нэрээр үлдээсэн бүх зүйлийг (файл, хавтас) устгана.
                 foreach (var leftover in SafeEnumerate(folder, tempBase + "*"))
                 {
                     try
@@ -409,7 +409,7 @@ namespace AutoWavExport
             if (File.Exists(withExt)) return withExt;
             string bare = Path.Combine(folder, tempBase);
             if (File.Exists(bare)) return bare;
-            // Some exporters create a sub-folder named after the export; look one level down.
+            // Зарим exporter export-ийн нэрээр дэд хавтас үүсгэдэг; доош нь хайна.
             var found = Directory.GetFiles(folder, tempBase + "*", SearchOption.AllDirectories)
                                  .Concat(Directory.GetDirectories(folder, tempBase + "*")
                                                   .SelectMany(d => Directory.GetFiles(d, "*.wav", SearchOption.AllDirectories)))
@@ -431,8 +431,8 @@ namespace AutoWavExport
             catch { return new string[0]; }
         }
 
-        // Persistent per-(microphone, window) failure counter so a window without recorded audio
-        // is not retried forever and does not keep the exit code red.
+        // (Микрофон, цонх) тус бүрийн бүтэлгүйтлийн тоолуур. Бичлэггүй цонхыг
+        // хязгааргүй дахин оролдож, exit code-ийг байнга алдаатай болгохоос сэргийлнэ.
         sealed class AttemptStore
         {
             readonly string path;
@@ -476,7 +476,7 @@ namespace AutoWavExport
             {
                 string k = Key(deviceId, windowEnd);
                 items[k] = Tuple.Create(Count(deviceId, windowEnd) + 1, error ?? "");
-                Save(); // persist immediately so a killed run still counts
+                Save(); // таслагдсан ч тоологдохоор шууд хадгална
             }
 
             public void Clear(string deviceId, DateTime windowEnd) { items.Remove(Key(deviceId, windowEnd)); }
@@ -509,8 +509,8 @@ namespace AutoWavExport
             }
         }
 
-        // Append-only observation history. A timestamp is when the exporter detected a
-        // name, NOT necessarily when a Milestone administrator actually renamed it.
+        // Зөвхөн нэмэгддэг нэрийн түүх. Цаг нь exporter нэрийг илрүүлсэн мөч бөгөөд
+        // Milestone админ нэрийг яг сольсон мөч биш байж болно.
         sealed class NameObservation
         {
             public string DeviceId { get; set; }
@@ -561,12 +561,12 @@ namespace AutoWavExport
 
         static string FolderForWindow(Item mic, string deviceId, DateTime end, List<NameObservation> history)
         {
-            // Use the name last observed BEFORE the recording interval ended.
-            // A name first observed after this period cannot safely label past audio.
+            // Бичлэгийн цонх дуусахаас ӨМНӨ хамгийн сүүлд ажигласан нэрийг хэрэглэнэ.
+            // Энэ хугацааны дараа анх ажигласан нэрээр өнгөрсөн бичлэгийг нэрлэх нь найдваргүй.
             var match = history.Where(x => x.DeviceId == deviceId && x.ObservedAt <= end)
                                .OrderByDescending(x => x.ObservedAt).FirstOrDefault();
             if (match != null) return match.Folder;
-            // For recordings earlier than the first observation, historical name is UNKNOWN.
+            // Анхны ажиглалтаас өмнөх бичлэгийн нэр ТОДОРХОЙГҮЙ.
             var first = history.Where(x => x.DeviceId == deviceId)
                                .OrderBy(x => x.ObservedAt).FirstOrDefault();
             if (first != null && end >= first.ObservedAt.AddHours(-2)) return first.Folder;
@@ -609,8 +609,8 @@ namespace AutoWavExport
             return SafeName(mic.Name) + "__" + id;
         }
 
-        // Never throws: an empty or unusable microphone name must not stop the whole run.
-        // The full GUID suffix in FolderName keeps the folder unique either way.
+        // Exception шидэхгүй: хоосон эсвэл буруу нэр бүх ажлыг зогсоох ёсгүй.
+        // FolderName-ийн төгсгөлийн бүтэн GUID хавтсыг ямар ч үед давхцуулахгүй.
         static string SafeName(string name)
         {
             var invalid = Path.GetInvalidFileNameChars();
@@ -628,8 +628,8 @@ namespace AutoWavExport
 
         static string ReadDpapiPassword(string file)
         {
-            // Set-Password.ps1 stores DPAPI(CurrentUser)-encrypted UTF-16 password bytes as hexadecimal.
-            // The file can only be decrypted by the same Windows account that created it.
+            // Set-Password.ps1 нууц үгийн UTF-16 байтыг DPAPI(CurrentUser)-аар шифрлээд hex хэлбэрээр хадгалдаг.
+            // Файлыг зөвхөн үүсгэсэн Windows account л тайлж чадна.
             var hex = File.ReadAllText(file).Trim();
             var bytes = Enumerable.Range(0, hex.Length / 2).Select(i => Convert.ToByte(hex.Substring(i*2, 2), 16)).ToArray();
             var plain = ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser);

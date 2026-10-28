@@ -4,8 +4,8 @@ using System.Text;
 
 namespace AutoWavExport
 {
-    // Checks RIFF/WAVE structure, chunk boundaries, format and nonempty audio.
-    // This is NOT evidence of uninterrupted recording for the entire requested interval.
+    // RIFF/WAVE бүтэц, chunk-ийн хил, формат болон хоосон биш аудиог шалгана.
+    // Энэ нь хүссэн хугацааг бүхэлд нь тасралтгүй бичсэний баталгаа БИШ.
     internal static class WavCheck
     {
         public static bool Validate(string path, out string reason)
