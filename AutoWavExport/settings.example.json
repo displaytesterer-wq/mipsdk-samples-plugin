@@ -5,12 +5,14 @@
   "OutputRoot": "D:\\MilestoneExports",
   "SampleRate": 8000,
   "Codec": "",
-  "ExportTimeoutMinutes": 240,
+  "ExportTimeoutMinutes": 60,
   "Retries": 2,
   "DryRun": true,
   "BackfillDays": 7,
   "MaxIntervalsPerRun": 40,
   "MinimumFreeGB": 20,
   "RetentionDays": 90,
-  "EnableRetentionDelete": false
+  "EnableRetentionDelete": false,
+  "MaxRunMinutes": 270,
+  "MaxWindowAttempts": 3
 }

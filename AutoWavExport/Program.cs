@@ -31,39 +31,76 @@ namespace AutoWavExport
         public int MinimumFreeGB { get; set; }
         public int RetentionDays { get; set; }
         public bool EnableRetentionDelete { get; set; }
+        // Total wall-clock budget for one invocation. Must stay below the Task Scheduler
+        // ExecutionTimeLimit (5 h in Install-Task.ps1) so the run finishes cleanly instead of being killed.
+        public int MaxRunMinutes { get; set; }
+        // After this many failed runs for the same microphone/window, stop retrying it automatically
+        // (typically: no recorded audio in that window). Manual --end ignores this limit.
+        public int MaxWindowAttempts { get; set; }
     }
+
+    // Not the window's fault: must not count toward MaxWindowAttempts.
+    sealed class LowDiskException : IOException { public LowDiskException(string m) : base(m) { } }
+    sealed class RunBudgetExceededException : TimeoutException { public RunBudgetExceededException(string m) : base(m) { } }
 
     internal static class Program
     {
         static readonly Guid IntegrationId = new Guid("86F42E94-41B8-4F47-9E56-6A815A0C482F");
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
+        // Global\ so that a scheduled run (session 0) and a manual run (RDP/console session)
+        // see the same lock and never export at the same time.
+        const string MutexName = @"Global\MilestoneAutoWavExport";
+        // Task Scheduler ExecutionTimeLimit configured by Install-Task.ps1.
+        const int TaskSchedulerLimitMinutes = 300;
+        const string WorkingMarker = ".working-";
+
         static int Main(string[] args)
         {
-            using (var mutex = new Mutex(false, @"Local\MilestoneAutoWavExport"))
+            Mutex mutex = null;
+            bool locked = false;
+            try
             {
-                bool locked = false;
-                try
+                try { mutex = new Mutex(false, MutexName); }
+                catch (UnauthorizedAccessException)
                 {
-                    locked = mutex.WaitOne(TimeSpan.FromSeconds(1));
-                    if (!locked) { Console.Error.WriteLine("Another export is active."); return 2; }
-                    return Run(args);
+                    // Lock exists and is owned by a different Windows account that is currently running.
+                    Console.Error.WriteLine("Another export is active (lock held by another account).");
+                    return 2;
                 }
-                catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
-                finally { if (locked) mutex.ReleaseMutex(); }
+                try { locked = mutex.WaitOne(TimeSpan.FromSeconds(1)); }
+                catch (AbandonedMutexException)
+                {
+                    // Previous process was killed while holding the lock; we now own it.
+                    locked = true;
+                    Console.Error.WriteLine("Previous run ended abnormally; lock recovered.");
+                }
+                if (!locked) { Console.Error.WriteLine("Another export is active."); return 2; }
+                return Run(args);
+            }
+            catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+            finally
+            {
+                if (locked) { try { mutex.ReleaseMutex(); } catch { } }
+                if (mutex != null) mutex.Dispose();
             }
         }
 
         static int Run(string[] args)
         {
+            DateTime runStartedUtc = DateTime.UtcNow;
             string config = Opt(args, "--config") ?? "settings.json";
             var s = Json.Deserialize<Settings>(File.ReadAllText(config, Encoding.UTF8));
             if (s == null || string.IsNullOrWhiteSpace(s.ManagementServer) ||
                 string.IsNullOrWhiteSpace(s.OutputRoot) || string.IsNullOrWhiteSpace(s.PasswordFile))
                 throw new InvalidOperationException("Incomplete settings.json");
+            ApplyDefaultsAndValidate(s);
+
             Directory.CreateDirectory(s.OutputRoot);
             string logDirectory = Path.Combine(s.OutputRoot, "_logs");
+            string stateDirectory = Path.Combine(s.OutputRoot, "_state");
             Directory.CreateDirectory(logDirectory);
+            Directory.CreateDirectory(stateDirectory);
             string logFile = Path.Combine(logDirectory, DateTime.Now.ToString("yyyy-MM-dd") + ".log");
             Action<string> log = message =>
             {
@@ -72,18 +109,20 @@ namespace AutoWavExport
                 File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
             };
 
-            DateTime end = (DateTime.Now.Date.AddHours((DateTime.Now.Hour / 6) * 6));
+            DateTime now = DateTime.Now;
+            DateTime end = now.Date.AddHours((now.Hour / 6) * 6);
             var specified = Opt(args, "--end");
             if (!string.IsNullOrWhiteSpace(specified))
                 end = DateTime.ParseExact(specified, "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
-            if (end.Minute != 0 || end.Second != 0 || end.Hour % 6 != 0 || end > DateTime.Now)
+            if (end.Minute != 0 || end.Second != 0 || end.Hour % 6 != 0 || end > now)
                 throw new ArgumentException("End must be a completed local 6-hour boundary.");
-            DateTime start = end.AddHours(-6);
-            if (s.BackfillDays <= 0 || s.BackfillDays > 90 || s.MaxIntervalsPerRun <= 0 || s.MaxIntervalsPerRun > 100)
-                throw new InvalidOperationException("Set BackfillDays 1..90 and MaxIntervalsPerRun 1..100.");
-            if (s.MinimumFreeGB <= 0) throw new InvalidOperationException("MinimumFreeGB must be positive.");
             Uri url = new Uri(s.ManagementServer);
             if (url.Scheme != Uri.UriSchemeHttps) throw new InvalidOperationException("Use verified HTTPS Management Server URL.");
+
+            // We hold the global lock, so any *.working-* file is a leftover from a killed run.
+            CleanupStaleWorkingFiles(s.OutputRoot, s.DryRun, log);
+
+            DateTime runDeadlineUtc = runStartedUtc.AddMinutes(s.MaxRunMinutes);
             string password = ReadDpapiPassword(s.PasswordFile);
             VideoOS.Platform.SDK.Environment.Initialize();
             VideoOS.Platform.SDK.Export.Environment.Initialize();
@@ -91,7 +130,7 @@ namespace AutoWavExport
             {
                 var cc = VideoOS.Platform.Login.Util.BuildCredentialCache(url, s.Username ?? "exporter", password, "Basic");
                 VideoOS.Platform.SDK.Environment.AddServer(true, url, cc, true);
-                VideoOS.Platform.SDK.Environment.Login(url, IntegrationId, "Auto WAV Export", "0.1.0", "Internal", true);
+                VideoOS.Platform.SDK.Environment.Login(url, IntegrationId, "Auto WAV Export", "0.2.0", "Internal", true);
                 var roots = Configuration.Instance.GetItemsByKind(Kind.Microphone, ItemHierarchy.SystemDefined);
                 var devices = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
                 foreach (var root in roots) Collect(root, devices, new HashSet<string>(), 0);
@@ -100,25 +139,37 @@ namespace AutoWavExport
                 var history = UpdateNameHistory(s.OutputRoot, devices, DateTime.Now, log);
                 bool inventory = args.Contains("--inventory");
                 string selected = Opt(args, "--device");
-                
+
                 foreach (var pair in devices.OrderBy(d => d.Key))
                     log("MIC " + pair.Key + " name=" + pair.Value.Name + " folder=" +
                         FolderName(pair.Value, pair.Key));
                 if (inventory) return 0;
                 if (devices.Count == 0) { log("ERROR no microphones discovered"); return 3; }
-                int failures = 0;
-                int attempted = 0;
-                var report = new List<string> { "device_id,window_start,window_end,status,detail" };
+
+                var targets = devices
+                    .Where(d => selected == null || string.Equals(selected, d.Key, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(d => d.Key)
+                    .ToList();
+                if (targets.Count == 0) { log("No matching microphone selected."); return 4; }
+
+                // Newest window first, and every microphone gets that window before any older backfill.
+                // Prevents later microphones from being starved by the first ones' backlog.
                 var windows = new List<DateTime>();
                 if (specified != null) windows.Add(end);
-                else for (DateTime w = end.AddDays(-s.BackfillDays).AddHours(6); w <= end; w = w.AddHours(6)) windows.Add(w);
-                int jobsProcessed = 0;
-                int skippedDueLimit = 0;
-                foreach (var pair in devices.OrderBy(x => x.Key))
+                else for (DateTime w = end; w > end.AddDays(-s.BackfillDays); w = w.AddHours(-6)) windows.Add(w);
+
+                var attempts = AttemptStore.Load(Path.Combine(stateDirectory, "window_attempts.csv"));
+                attempts.Prune(end.AddDays(-s.BackfillDays - 1));
+
+                // Report is appended row by row so it survives even if the process is terminated.
+                string reportPath = Path.Combine(logDirectory, "export-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
+                File.WriteAllText(reportPath, "device_id,window_start,window_end,status,detail" + Environment.NewLine, Encoding.UTF8);
+                log("Report=" + reportPath);
+
+                int failures = 0, deferred = 0, gaveUp = 0, jobsProcessed = 0;
+                foreach (var windowEnd in windows)
                 {
-                    if (selected != null && !string.Equals(selected, pair.Key, StringComparison.OrdinalIgnoreCase)) continue;
-                    attempted++;
-                    foreach (var windowEnd in windows)
+                    foreach (var pair in targets)
                     {
                         DateTime windowStart = windowEnd.AddHours(-6);
                         string status = "ERROR", detail = "";
@@ -129,9 +180,21 @@ namespace AutoWavExport
                             string filename = windowStart.ToString("HHmm") + "-" + windowEnd.ToString("HHmm") + ".wav";
                             string finalPath = Path.Combine(folder, filename);
                             if (File.Exists(finalPath) && WavCheck.Validate(finalPath, out detail))
-                            { status = "EXISTS_VALID"; continue; }
+                            { status = "EXISTS_VALID"; attempts.Clear(pair.Key, windowEnd); continue; }
                             if (File.Exists(finalPath)) throw new IOException("Existing WAV invalid, manual quarantine required: " + detail);
-                            if (jobsProcessed >= s.MaxIntervalsPerRun) { status = "DEFERRED"; skippedDueLimit++; continue; }
+
+                            int previous = attempts.Count(pair.Key, windowEnd);
+                            if (specified == null && previous >= s.MaxWindowAttempts)
+                            {
+                                status = "GAVE_UP";
+                                detail = previous + " failed runs; last error: " + attempts.LastError(pair.Key, windowEnd) +
+                                         ". Rerun manually with --end " + windowEnd.ToString("yyyy-MM-ddTHH:mm:ss") + " --device " + pair.Key;
+                                gaveUp++;
+                                continue;
+                            }
+                            if (jobsProcessed >= s.MaxIntervalsPerRun) { status = "DEFERRED"; detail = "MaxIntervalsPerRun reached"; deferred++; continue; }
+                            // Need room for at least one full attempt plus shutdown.
+                            if (DateTime.UtcNow.AddMinutes(5) >= runDeadlineUtc) { status = "DEFERRED"; detail = "MaxRunMinutes budget reached"; deferred++; continue; }
                             if (s.DryRun) { status = "DRY_RUN"; log("DRY RUN " + finalPath); continue; }
                             GuardDisk(s.OutputRoot, s.MinimumFreeGB);
                             Directory.CreateDirectory(folder);
@@ -141,8 +204,10 @@ namespace AutoWavExport
                             {
                                 try
                                 {
-                                    ExportOne(pair.Value, folder, filename, windowStart, windowEnd, s, log);
+                                    DateTime attemptDeadline = DateTime.UtcNow.AddMinutes(s.ExportTimeoutMinutes);
+                                    ExportOne(pair.Value, folder, filename, windowStart, windowEnd, s, attemptDeadline, runDeadlineUtc);
                                     status = "SUCCESS"; detail = "WAV structure valid";
+                                    attempts.Clear(pair.Key, windowEnd);
                                     log("SUCCESS " + pair.Key + " " + finalPath);
                                     break;
                                 }
@@ -150,28 +215,76 @@ namespace AutoWavExport
                                 {
                                     detail = ex.Message;
                                     log("ATTEMPT " + n + "/" + tries + " FAILED " + pair.Key + " " + windowEnd.ToString("o") + ": " + detail);
-                                    if (n == tries) throw;
-                                    Thread.Sleep(TimeSpan.FromSeconds(20 * n));
+                                    TimeSpan pause = TimeSpan.FromSeconds(20 * n);
+                                    bool timeLeft = DateTime.UtcNow.Add(pause).AddMinutes(5) < runDeadlineUtc;
+                                    if (n == tries || !timeLeft || ex is RunBudgetExceededException) throw;
+                                    Thread.Sleep(pause);
                                 }
                             }
                         }
-                        catch (Exception ex) { failures++; detail = ex.Message; log("ERROR " + pair.Key + ": " + ex); }
+                        catch (RunBudgetExceededException ex)
+                        {
+                            // Stopped to stay inside the Task Scheduler limit; retried next run, not counted.
+                            status = "DEFERRED"; detail = ex.Message; deferred++;
+                            log("DEFERRED " + pair.Key + " " + windowEnd.ToString("o") + ": " + ex.Message);
+                        }
+                        catch (Exception ex)
+                        {
+                            failures++;
+                            detail = ex.Message;
+                            log("ERROR " + pair.Key + ": " + ex);
+                            if (!s.DryRun && !(ex is LowDiskException)) attempts.RecordFailure(pair.Key, windowEnd, ex.Message);
+                        }
                         finally
                         {
-                            report.Add(Csv(pair.Key) + "," + Csv(windowStart.ToString("o")) + "," +
-                                       Csv(windowEnd.ToString("o")) + "," + Csv(status) + "," + Csv(detail));
+                            File.AppendAllText(reportPath,
+                                Csv(pair.Key) + "," + Csv(windowStart.ToString("o")) + "," +
+                                Csv(windowEnd.ToString("o")) + "," + Csv(status) + "," + Csv(detail) + Environment.NewLine,
+                                Encoding.UTF8);
                         }
                     }
                 }
-                if (attempted == 0) { log("No matching microphone selected."); return 4; }
-                string reportPath = Path.Combine(logDirectory, "export-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
-                File.WriteAllLines(reportPath, report, Encoding.UTF8);
-                log("Report=" + reportPath + " failures=" + failures + " deferred=" + skippedDueLimit);
+                if (!s.DryRun) attempts.Save();
+                log("Done failures=" + failures + " deferred=" + deferred + " gave_up=" + gaveUp);
                 if (!s.DryRun && s.EnableRetentionDelete) RetentionCleanup(s.OutputRoot, s.RetentionDays, log);
                 // Nonzero exit status is picked up by Task Scheduler and external monitoring.
-                return failures == 0 && skippedDueLimit == 0 ? 0 : 5;
+                // GAVE_UP windows were already reported as failures in the runs that gave up on them.
+                return failures == 0 && deferred == 0 ? 0 : 5;
             }
             finally { VideoOS.Platform.SDK.Environment.RemoveAllServers(); }
+        }
+
+        static void ApplyDefaultsAndValidate(Settings s)
+        {
+            // JavaScriptSerializer leaves missing numbers at 0; treat 0 as "use default".
+            if (s.ExportTimeoutMinutes <= 0) s.ExportTimeoutMinutes = 60;
+            if (s.MaxRunMinutes <= 0) s.MaxRunMinutes = 270;
+            if (s.MaxWindowAttempts <= 0) s.MaxWindowAttempts = 3;
+            if (s.Retries < 0) s.Retries = 0;
+
+            if (s.BackfillDays <= 0 || s.BackfillDays > 90 || s.MaxIntervalsPerRun <= 0 || s.MaxIntervalsPerRun > 100)
+                throw new InvalidOperationException("Set BackfillDays 1..90 and MaxIntervalsPerRun 1..100.");
+            if (s.MinimumFreeGB <= 0) throw new InvalidOperationException("MinimumFreeGB must be positive.");
+            if (s.MaxRunMinutes < 30 || s.MaxRunMinutes > TaskSchedulerLimitMinutes - 15)
+                throw new InvalidOperationException("MaxRunMinutes must be 30.." + (TaskSchedulerLimitMinutes - 15) +
+                                                    " (Task Scheduler stops the task at " + TaskSchedulerLimitMinutes + " minutes).");
+            if (s.ExportTimeoutMinutes < 5 || s.ExportTimeoutMinutes > s.MaxRunMinutes - 5)
+                throw new InvalidOperationException("ExportTimeoutMinutes must be 5..MaxRunMinutes-5.");
+            if (s.MaxWindowAttempts > 20) throw new InvalidOperationException("MaxWindowAttempts must be 1..20.");
+            if (s.EnableRetentionDelete && s.RetentionDays <= s.BackfillDays)
+                throw new InvalidOperationException("RetentionDays must be greater than BackfillDays, otherwise deleted files are exported again.");
+        }
+
+        static void CleanupStaleWorkingFiles(string root, bool dryRun, Action<string> log)
+        {
+            foreach (var file in Directory.EnumerateFiles(root, "*" + WorkingMarker + "*", SearchOption.AllDirectories))
+            {
+                string rel = file.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar);
+                if (rel.StartsWith("_", StringComparison.Ordinal)) continue;
+                if (dryRun) { log("DRY RUN would remove stale temp " + file); continue; }
+                try { File.Delete(file); log("REMOVED stale temp " + file); }
+                catch (Exception ex) { log("WARN could not remove stale temp " + file + ": " + ex.Message); }
+            }
         }
 
         static void GuardDisk(string folder, int requiredGb)
@@ -179,7 +292,7 @@ namespace AutoWavExport
             string root = Path.GetPathRoot(Path.GetFullPath(folder));
             long free = new DriveInfo(root).AvailableFreeSpace;
             if (free < (long)requiredGb * 1024 * 1024 * 1024)
-                throw new IOException("Low export disk free space: " + free + " bytes");
+                throw new LowDiskException("Low export disk free space: " + free + " bytes");
         }
 
         static void RetentionCleanup(string root, int days, Action<string> log)
@@ -217,58 +330,182 @@ namespace AutoWavExport
                 Collect(child, list, visited, depth + 1);
         }
 
-        static void ExportOne(Item mic, string folder, string name, DateTime start, DateTime end, Settings s, Action<string> log)
+        static void ExportOne(Item mic, string folder, string name, DateTime start, DateTime end, Settings s,
+                              DateTime attemptDeadlineUtc, DateTime runDeadlineUtc)
         {
             // Request one microphone per WAV; no related camera is necessary.
             // UTC follows the official standalone AudioExportSample.
-            string tempName = Path.GetFileNameWithoutExtension(name) + ".working-" + Guid.NewGuid().ToString("N") + ".wav";
-            string tempPath = Path.Combine(folder, tempName);
+            // FileName is given WITHOUT extension; the produced file is located afterwards, so it works
+            // whether or not the SDK appends ".wav" itself.
+            string tempBase = Path.GetFileNameWithoutExtension(name) + WorkingMarker + Guid.NewGuid().ToString("N");
             WAVExporter exporter = null;
+            bool ended = false;
             try
             {
                 exporter = new WAVExporter
                 {
-                    FileName = tempName,
+                    FileName = tempBase,
                     Path = folder,
                     AudioList = new List<Item> { mic },
                     AudioSampleRate = s.SampleRate <= 0 ? 8000 : s.SampleRate
                 };
                 exporter.Init();
-                var codecs = exporter.CodecList;
+                var codecs = exporter.CodecList ?? new string[0];
                 string codec = string.IsNullOrWhiteSpace(s.Codec) ? codecs.FirstOrDefault() : s.Codec;
                 if (string.IsNullOrWhiteSpace(codec) || !codecs.Contains(codec))
-                    throw new InvalidOperationException("Configured WAV codec is unavailable.");
+                    throw new InvalidOperationException("Configured WAV codec is unavailable. Available: " + string.Join(", ", codecs));
                 exporter.Codec = codec;
                 if (!exporter.StartExport(start.ToUniversalTime(), end.ToUniversalTime()))
                     throw new InvalidOperationException("StartExport failed: " + exporter.LastErrorString);
-                DateTime deadline = DateTime.UtcNow.AddMinutes(Math.Max(5, s.ExportTimeoutMinutes));
                 while (exporter.Progress < 100)
                 {
-                    if (exporter.LastError > 0)
-                        throw new InvalidOperationException(exporter.LastErrorString);
-                    if (DateTime.UtcNow > deadline)
-                        throw new TimeoutException("WAV exporter exceeded timeout.");
+                    if (exporter.LastError != 0)
+                        throw new InvalidOperationException("Exporter error " + exporter.LastError + ": " + exporter.LastErrorString);
+                    if (DateTime.UtcNow > runDeadlineUtc)
+                        throw new RunBudgetExceededException("Stopped at MaxRunMinutes; window will be retried next run.");
+                    if (DateTime.UtcNow > attemptDeadlineUtc)
+                        throw new TimeoutException("WAV exporter exceeded ExportTimeoutMinutes.");
                     Thread.Sleep(1000);
                 }
+                if (exporter.LastError != 0)
+                    throw new InvalidOperationException("Exporter error " + exporter.LastError + ": " + exporter.LastErrorString);
                 exporter.EndExport();
+                ended = true;
+
+                string produced = FindProducedFile(folder, tempBase);
                 string reason;
-                if (!WavCheck.Validate(tempPath, out reason))
+                if (!WavCheck.Validate(produced, out reason))
                     throw new IOException("WAV structure check failed: " + reason);
-                File.Move(tempPath, Path.Combine(folder, name));
+                File.Move(produced, Path.Combine(folder, name));
             }
             catch
             {
-                if (exporter != null) { try { exporter.Cancel(); } catch {} }
+                if (exporter != null && !ended) { try { exporter.Cancel(); } catch {} }
                 throw;
             }
             finally
             {
                 if (exporter != null)
                 {
-                    try { exporter.EndExport(); } catch {}
+                    if (!ended) { try { exporter.EndExport(); } catch {} }
                     try { exporter.Close(); } catch {}
                 }
-                if (File.Exists(tempPath)) { try { File.Delete(tempPath); } catch {} }
+                // Remove anything the exporter left with our temp name (file or folder).
+                foreach (var leftover in SafeEnumerate(folder, tempBase + "*"))
+                {
+                    try
+                    {
+                        if (Directory.Exists(leftover)) Directory.Delete(leftover, true);
+                        else File.Delete(leftover);
+                    }
+                    catch {}
+                }
+            }
+        }
+
+        static string FindProducedFile(string folder, string tempBase)
+        {
+            string withExt = Path.Combine(folder, tempBase + ".wav");
+            if (File.Exists(withExt)) return withExt;
+            string bare = Path.Combine(folder, tempBase);
+            if (File.Exists(bare)) return bare;
+            // Some exporters create a sub-folder named after the export; look one level down.
+            var found = Directory.GetFiles(folder, tempBase + "*", SearchOption.AllDirectories)
+                                 .Concat(Directory.GetDirectories(folder, tempBase + "*")
+                                                  .SelectMany(d => Directory.GetFiles(d, "*.wav", SearchOption.AllDirectories)))
+                                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                                 .Where(f => f.EndsWith(".wav", StringComparison.OrdinalIgnoreCase))
+                                 .ToList();
+            if (found.Count == 1) return found[0];
+            if (found.Count == 0) throw new FileNotFoundException("Exporter reported 100% but no output file named " + tempBase + "[.wav] was found in " + folder);
+            throw new IOException("Exporter produced several WAV files for one microphone: " + string.Join("; ", found));
+        }
+
+        static IEnumerable<string> SafeEnumerate(string folder, string pattern)
+        {
+            try
+            {
+                if (!Directory.Exists(folder)) return new string[0];
+                return Directory.GetFileSystemEntries(folder, pattern);
+            }
+            catch { return new string[0]; }
+        }
+
+        // Persistent per-(microphone, window) failure counter so a window without recorded audio
+        // is not retried forever and does not keep the exit code red.
+        sealed class AttemptStore
+        {
+            readonly string path;
+            readonly Dictionary<string, Tuple<int, string>> items = new Dictionary<string, Tuple<int, string>>(StringComparer.OrdinalIgnoreCase);
+
+            AttemptStore(string path) { this.path = path; }
+
+            static string Key(string deviceId, DateTime windowEnd)
+            {
+                return deviceId + "|" + windowEnd.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+            }
+
+            public static AttemptStore Load(string path)
+            {
+                var store = new AttemptStore(path);
+                if (!File.Exists(path)) return store;
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8).Skip(1))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    var c = ParseCsv(line);
+                    int n;
+                    if (c.Count != 4 || !int.TryParse(c[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) continue;
+                    store.items[c[0] + "|" + c[1]] = Tuple.Create(n, c[3]);
+                }
+                return store;
+            }
+
+            public int Count(string deviceId, DateTime windowEnd)
+            {
+                Tuple<int, string> v;
+                return items.TryGetValue(Key(deviceId, windowEnd), out v) ? v.Item1 : 0;
+            }
+
+            public string LastError(string deviceId, DateTime windowEnd)
+            {
+                Tuple<int, string> v;
+                return items.TryGetValue(Key(deviceId, windowEnd), out v) ? v.Item2 : "";
+            }
+
+            public void RecordFailure(string deviceId, DateTime windowEnd, string error)
+            {
+                string k = Key(deviceId, windowEnd);
+                items[k] = Tuple.Create(Count(deviceId, windowEnd) + 1, error ?? "");
+                Save(); // persist immediately so a killed run still counts
+            }
+
+            public void Clear(string deviceId, DateTime windowEnd) { items.Remove(Key(deviceId, windowEnd)); }
+
+            public void Prune(DateTime olderThan)
+            {
+                foreach (var k in items.Keys.ToList())
+                {
+                    DateTime w;
+                    string stamp = k.Substring(k.IndexOf('|') + 1);
+                    if (DateTime.TryParseExact(stamp, "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out w) && w < olderThan)
+                        items.Remove(k);
+                }
+            }
+
+            public void Save()
+            {
+                var rows = new List<string> { "DeviceId,WindowEnd,FailedRuns,LastError" };
+                foreach (var kv in items.OrderBy(x => x.Key))
+                {
+                    int bar = kv.Key.IndexOf('|');
+                    rows.Add(Csv(kv.Key.Substring(0, bar)) + "," + Csv(kv.Key.Substring(bar + 1)) + "," +
+                             Csv(kv.Value.Item1.ToString(CultureInfo.InvariantCulture)) + "," +
+                             Csv((kv.Value.Item2 ?? "").Replace("\r", " ").Replace("\n", " ")));
+                }
+                string tmp = path + ".tmp";
+                File.WriteAllLines(tmp, rows, Encoding.UTF8);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
             }
         }
 
@@ -361,10 +598,9 @@ namespace AutoWavExport
 
         static void WriteInventory(string root, IDictionary<string, Item> devices)
         {
-            Func<string,string> csv = value => "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
             var rows = new List<string> { "DeviceId,MicrophoneName,Folder" };
             foreach (var pair in devices.OrderBy(x => x.Key))
-                rows.Add(csv(pair.Key) + "," + csv(pair.Value.Name) + "," + csv(FolderName(pair.Value, pair.Key)));
+                rows.Add(Csv(pair.Key) + "," + Csv(pair.Value.Name) + "," + Csv(FolderName(pair.Value, pair.Key)));
             File.WriteAllLines(Path.Combine(root, "microphones.csv"), rows, Encoding.UTF8);
         }
 
@@ -373,24 +609,27 @@ namespace AutoWavExport
             return SafeName(mic.Name) + "__" + id;
         }
 
+        // Never throws: an empty or unusable microphone name must not stop the whole run.
+        // The full GUID suffix in FolderName keeps the folder unique either way.
         static string SafeName(string name)
         {
             var invalid = Path.GetInvalidFileNameChars();
-            string clean = new string((name ?? "").Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim().Trim('.');
-            if (clean.Length > 90) clean = clean.Substring(0, 90);
-            if (string.IsNullOrWhiteSpace(clean) || clean == "..") throw new ArgumentException("Invalid hardware name");
+            string clean = new string((name ?? "").Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim().Trim('.').Trim();
+            if (clean.Length > 90) clean = clean.Substring(0, 90).TrimEnd('.', ' ');
+            if (string.IsNullOrWhiteSpace(clean)) clean = "MIC_unnamed";
             return clean;
         }
+
         static string Opt(string[] a, string k)
         {
             for(int i=0; i<a.Length-1; i++) if (a[i] == k) return a[i+1];
             return null;
         }
+
         static string ReadDpapiPassword(string file)
         {
-            // PowerShell ConvertFrom-SecureString without -Key creates a DPAPI encrypted standard string.
-            // The file is decrypted using the current user's DPAPI key.
-            // PowerShell exposes DPAPI blob as Unicode text encrypted bytes in hexadecimal.
+            // Set-Password.ps1 stores DPAPI(CurrentUser)-encrypted UTF-16 password bytes as hexadecimal.
+            // The file can only be decrypted by the same Windows account that created it.
             var hex = File.ReadAllText(file).Trim();
             var bytes = Enumerable.Range(0, hex.Length / 2).Select(i => Convert.ToByte(hex.Substring(i*2, 2), 16)).ToArray();
             var plain = ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser);

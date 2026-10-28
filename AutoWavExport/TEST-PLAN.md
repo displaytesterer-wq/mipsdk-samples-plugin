@@ -22,6 +22,11 @@
 10. Check no WAV is overwritten, corrupted files halt instead of being replaced, and retry behavior.
 11. With EnableRetentionDelete false confirm no deletion; with test-only sandbox paths and 2-day retention test only old YYYY-MM-DD subfolder WAV deletion. Do NOT enable on production before backup and legal retention policy approval.
 12. Verify Task Scheduler runs unattended and captures exit code, file ACLs and DPAPI identity.
+13. Confirm the produced file name: check whether WAVExporter appends `.wav` to `FileName` (the exporter now locates either form; log shows the result).
+14. While the scheduled task is running, start a manual run from an RDP session: it must exit with code 2 (global lock).
+15. Set MaxRunMinutes=30 and ExportTimeoutMinutes=10 on a test box: verify DEFERRED rows, report CSV complete, and no `*.working-*` files left after the next run.
+16. Pick a window with no recorded audio: after 3 runs it must show GAVE_UP, exit code returns to 0, and a manual `--end ... --device ...` still attempts it.
+17. Name a test microphone with only spaces/dots: run must continue with folder `MIC_unnamed__<GUID>`.
 
 ## Known unresolved requirements
 - No verification of real 2025 R3 build, runtime, SSL, login or recordings.

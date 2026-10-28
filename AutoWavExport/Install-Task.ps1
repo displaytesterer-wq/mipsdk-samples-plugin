@@ -8,6 +8,7 @@ if (!(Test-Path $Exe)) { throw "EXE not found: $Exe" }
 if (!(Test-Path $Settings)) { throw "Settings not found: $Settings" }
 $action = New-ScheduledTaskAction -Execute $Exe -Argument ('--config "' + $Settings + '"') -WorkingDirectory (Split-Path $Exe)
 $triggers = @('00:30','06:30','12:30','18:30') | ForEach-Object { New-ScheduledTaskTrigger -Daily -At $_ }
+# ExecutionTimeLimit (5 h) must stay above MaxRunMinutes in settings.json (max 285, default 270).
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 5) -StartWhenAvailable
 # Run this script as the dedicated Windows account that owns the DPAPI secret.
 # Interactive registration below uses that same user's credentials, not stored in GitHub.

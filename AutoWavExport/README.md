@@ -9,7 +9,8 @@ Stand-alone, no Smart Client dependency. Based on the Milestone component AudioE
 - Enumerates microphone Items from the **physical/system-defined** SDK tree, without requiring a related camera.
 - Exports microphones individually to WAV. A missed job can be rerun manually with `--end 2026-10-27T06:00:00`; the end time is the **local** six-hour boundary, not the start.
 - Every invocation uses the last completed 6-hour boundary. Recommended Task Scheduler triggers: **00:30, 06:30, 12:30, 18:30** local Windows time, because archive starts at 00/06/12/18. The 30-minute margin is not proof archiving completed.
-- Only produces final file after exporter reports 100% and output exists. Does not overwrite existing files. Retries failures. Per-microphone failures do not stop other devices. Log file in `OutputRoot\_logs`.
+- Only produces final file after exporter reports 100% and output exists. Does not overwrite existing files. Retries failures. Per-microphone failures (including an empty/invalid microphone name, which falls back to `MIC_unnamed__<GUID>`) do not stop other devices. Log file in `OutputRoot\_logs`.
+- A global lock (`Global\MilestoneAutoWavExport`) prevents a manual run and the scheduled task from exporting at the same time, even from different Windows sessions.
 - Output `MicrophoneName__FullDeviceGUID\yyyy-MM-dd\HHmm-HHmm.wav`. A full GUID prevents collisions.
 
 ## Microphone identification
@@ -34,7 +35,7 @@ No Hardware/camera relationship or manual mapping is required. The current SDK m
 - Settings file is deliberately local; storage and secret ACLs should restrict access.
 
 ## Outstanding pre-production verification
-- Compile against the exact 2025 R3 MIP SDK; validate BuildCredentialCache, microphone discovery and exporter APIs.
+- Compile against the exact 2025 R3 MIP SDK (package pinned to 25.3.2); validate BuildCredentialCache, microphone discovery and exporter APIs.
 - Validate actual Basic login URL/certificate and exported WAV output naming/duration with one unrelated microphone.
 - Test first scheduled run, archive boundary, rename, historical retry, DST/timezone, duplicate name/path and incomplete output handling.
 - Verify the actual archive completion delay, recording retention, disk capacity, access-control lists and unattended Windows task identity.
@@ -42,12 +43,18 @@ No Hardware/camera relationship or manual mapping is required. The current SDK m
 - User has not supplied Management Server endpoint, local export disk size or microphone count.
 
 ## Reliability controls (unverified in production)
-- **Backfill**: on each run inspect the last BackfillDays of six-hour windows for each microphone. Valid files are skipped; missing windows are exported sequentially, up to MaxIntervalsPerRun per invocation. DryRun does not mark a window as complete. The window history is bounded: outages longer than BackfillDays require explicit --end/manual recovery.
+- **Backfill**: on each run inspect the last BackfillDays of six-hour windows for each microphone. Valid files are skipped; missing windows are exported **newest window first, across all microphones**, up to MaxIntervalsPerRun per invocation, so no microphone is starved by another's backlog. DryRun does not mark a window as complete. The window history is bounded: outages longer than BackfillDays require explicit --end/manual recovery.
 - **Integrity**: checks RIFF/WAVE, declared size, fmt and nonempty data chunks. It does **not** prove six hours of continuous audio; see TEST-PLAN.md. Invalid existing files are not overwritten and must be manually quarantined.
+- **Run time budget**: `MaxRunMinutes` (default 270, max 285) keeps each run inside the 5-hour Task Scheduler limit. Per-attempt timeout is `ExportTimeoutMinutes` (default 60). Windows not started in time are reported `DEFERRED` and picked up next run. Leftover `*.working-*` temp files from a killed run are removed at the next start.
+- **Windows without audio**: each failed window is counted in `_state\window_attempts.csv`. After `MaxWindowAttempts` failed runs (default 3) it is reported `GAVE_UP` and no longer retried automatically, so an empty window does not keep the exit code red. Re-run manually with `--end <window end> --device <GUID>` (manual runs ignore the limit). Low-disk and run-budget stops are not counted.
+- **Report**: `export-report-*.csv` is written row by row, so it survives a terminated run.
 - **Disk**: MinimumFreeGB threshold before each new export; Task Scheduler exit code and per-run CSV report show failures.
 - **Alerting**: CSV export-report-*.csv and _logs plus nonzero exit status; external email/notification integration **not yet configured**.
 - **Retention**: RetentionDays applies only to exported dated WAV subfolders and only when EnableRetentionDelete=true; OFF by default. Never point OutputRoot at a Milestone database.
 - **Release gate**: [TEST-PLAN.md](TEST-PLAN.md) documents build/runtime/manual tests. NONE are marked completed.
 
 ## Example settings
-BackfillDays=7; MaxIntervalsPerRun=40; MinimumFreeGB=20; RetentionDays=90; EnableRetentionDelete=false. Select retention after confirming applicable policy.
+BackfillDays=7; MaxIntervalsPerRun=40; MinimumFreeGB=20; RetentionDays=90; EnableRetentionDelete=false; ExportTimeoutMinutes=60; MaxRunMinutes=270; MaxWindowAttempts=3. RetentionDays must be greater than BackfillDays when retention delete is enabled.
+
+## Exit codes
+0 = all done, 1 = fatal error, 2 = another run active, 3 = no microphones, 4 = `--device` matched nothing, 5 = failures or deferred windows in this run. Select retention after confirming applicable policy.
