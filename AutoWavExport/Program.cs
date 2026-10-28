@@ -25,6 +25,9 @@ namespace AutoWavExport
         public string Username { get; set; }
         public string PasswordFile { get; set; }
         public string OutputRoot { get; set; }
+        // Лог, төлөв, нэрийн түүх, microphones.csv хадгалах хавтас. Хоосон бол settings.json-ий
+        // хажуугийн "data" хавтас (жишээ нь C:\MilestoneAutoWav\data). OutputRoot-д зөвхөн WAV үлдэнэ.
+        public string DataRoot { get; set; }
         public int SampleRate { get; set; }
         public string Codec { get; set; }
         public int ExportTimeoutMinutes { get; set; }
@@ -106,10 +109,15 @@ namespace AutoWavExport
             ApplyDefaultsAndValidate(s);
 
             Directory.CreateDirectory(s.OutputRoot);
-            string logDirectory = Path.Combine(s.OutputRoot, "_logs");
-            string stateDirectory = Path.Combine(s.OutputRoot, "_state");
+            string dataRoot = string.IsNullOrWhiteSpace(s.DataRoot)
+                ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(config)), "data")
+                : s.DataRoot;
+            string logDirectory = Path.Combine(dataRoot, "logs");
+            string stateDirectory = Path.Combine(dataRoot, "state");
             Directory.CreateDirectory(logDirectory);
             Directory.CreateDirectory(stateDirectory);
+            // Өмнөх хувилбар эдгээр файлыг OutputRoot-д бичдэг байсан; нэг удаа шилжүүлнэ.
+            var migrated = MigrateMetadata(s.OutputRoot, dataRoot, logDirectory, stateDirectory);
             string logFile = Path.Combine(logDirectory, DateTime.Now.ToString("yyyy-MM-dd") + ".log");
             Action<string> log = message =>
             {
@@ -117,6 +125,8 @@ namespace AutoWavExport
                 Console.WriteLine(line);
                 File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
             };
+            log("DataRoot=" + dataRoot);
+            foreach (var m in migrated) log("MIGRATED " + m);
 
             DateTime now = DateTime.Now;
             DateTime end = now.Date.AddHours((now.Hour / 6) * 6);
@@ -163,8 +173,8 @@ namespace AutoWavExport
                 var devices = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase);
                 foreach (var root in roots) Collect(root, devices, new HashSet<string>(), 0);
                 log("Inventory count: " + devices.Count);
-                WriteInventory(s.OutputRoot, devices);
-                var history = UpdateNameHistory(s.OutputRoot, devices, DateTime.Now, log);
+                WriteInventory(dataRoot, devices);
+                var history = UpdateNameHistory(dataRoot, devices, DateTime.Now, log);
                 bool inventory = args.Contains("--inventory");
                 string selected = Opt(args, "--device");
 
@@ -301,6 +311,33 @@ namespace AutoWavExport
             if (s.MaxWindowAttempts > 20) throw new InvalidOperationException("MaxWindowAttempts must be 1..20.");
             if (s.EnableRetentionDelete && s.RetentionDays <= s.BackfillDays)
                 throw new InvalidOperationException("RetentionDays must be greater than BackfillDays, otherwise deleted files are exported again.");
+        }
+
+        // OutputRoot\_logs, _state, device_history.csv, microphones.csv-г DataRoot руу зөөнө.
+        // Зорьсон газар файл байвал хуучныг нь хөндөхгүй. C: болон D: өөр диск байж болох тул хуулаад устгана.
+        static List<string> MigrateMetadata(string outputRoot, string dataRoot, string logDirectory, string stateDirectory)
+        {
+            var moved = new List<string>();
+            if (string.Equals(Path.GetFullPath(outputRoot).TrimEnd('\\'), Path.GetFullPath(dataRoot).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                return moved;
+            Action<string, string> move = (from, to) =>
+            {
+                if (!File.Exists(from) || File.Exists(to)) return;
+                File.Copy(from, to);
+                File.Delete(from);
+                moved.Add(from + " -> " + to);
+            };
+            move(Path.Combine(outputRoot, "device_history.csv"), Path.Combine(dataRoot, "device_history.csv"));
+            move(Path.Combine(outputRoot, "microphones.csv"), Path.Combine(dataRoot, "microphones.csv"));
+            foreach (var pair in new[] { Tuple.Create("_logs", logDirectory), Tuple.Create("_state", stateDirectory) })
+            {
+                string oldDir = Path.Combine(outputRoot, pair.Item1);
+                if (!Directory.Exists(oldDir)) continue;
+                foreach (var f in Directory.GetFiles(oldDir))
+                    move(f, Path.Combine(pair.Item2, Path.GetFileName(f)));
+                try { if (!Directory.EnumerateFileSystemEntries(oldDir).Any()) Directory.Delete(oldDir); } catch { }
+            }
+            return moved;
         }
 
         static void CleanupStaleWorkingFiles(string root, bool dryRun, Action<string> log)
